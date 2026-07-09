@@ -1,0 +1,25 @@
+# ROMs and save data — copyrighted, never commit
+*.smc
+*.sfc
+*.srm
+*.sav
+*.state
+
+# Rust build artifacts
+OxideSFC/target/
+
+# Node dependencies
+node_modules/
+
+# Frontend build output
+OxideSFC/oxidesfc-frontend/dist/
+
+# Tauri generated schemas
+OxideSFC/oxidesfc-frontend/gen/
+
+# Claude Code local state
+.claude/
+
+# OS files
+Thumbs.db
+.DS_Store

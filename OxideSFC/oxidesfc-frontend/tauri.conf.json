@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OxideSFC",
+  "version": "0.1.0",
+  "identifier": "com.oxidesfc.app",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "frontendDist": "dist",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "OxideSFC",
+        "width": 1280,
+        "height": 720,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "fileAssociations": [
+      {
+        "ext": ["sfc"],
+        "name": "SNES ROM",
+        "description": "Super Nintendo Entertainment System ROM"
+      },
+      {
+        "ext": ["smc"],
+        "name": "SNES ROM (SMC)",
+        "description": "Super Nintendo ROM with SMC header"
+      },
+      {
+        "ext": ["fig"],
+        "name": "SNES ROM (FIG)",
+        "description": "SNES ROM in FIG format"
+      },
+      {
+        "ext": ["swc"],
+        "name": "SNES ROM (SWC)",
+        "description": "SNES ROM in SWC format"
+      }
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

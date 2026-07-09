@@ -1,0 +1,17 @@
+[package]
+name = "oxidesfc-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.4"
+
+[features]
+default = ["std"]
+std = []
+# Temporary diagnostic aid: tracks every CPU stack push/pull's byte-width in
+# a shadow LIFO stack and flags the exact instruction where a pull's width
+# doesn't match its corresponding push -- used to pinpoint stack-corruption
+# bugs precisely instead of waiting for them to surface as a crash much
+# later. Not for normal use (extra allocation/bookkeeping per push/pull).
+stack_shadow_debug = []

@@ -1,0 +1,69 @@
+[package]
+name = "oxidesfc-frontend"
+version = "0.1.0"
+edition = "2021"
+description = "OxideSFC - SNES Emulator Frontend"
+authors = ["OxideSFC Team"]
+license = "MIT"
+
+[[bin]]
+name = "oxidesfc-frontend"
+path = "src-tauri/src/main.rs"
+
+[lib]
+name = "oxidesfc_frontend_lib"
+path = "src-tauri/src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Core
+oxidesfc-core = { path = "../oxidesfc-core" }
+
+# Tauri
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# File handling
+dirs = "5"
+walkdir = "2"
+
+# IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Archives
+zip = "2"
+
+# Input
+gilrs = "0.11"
+
+# Hashing
+crc32fast = "1"
+
+# Date/time
+chrono = "0.4"
+tauri-plugin-mcp-bridge = "0.11.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Gaming_Input"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
