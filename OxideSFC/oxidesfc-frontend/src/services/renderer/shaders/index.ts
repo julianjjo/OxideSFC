@@ -447,22 +447,13 @@ out vec4 fragColor;
 uniform sampler2D uTexture;
 uniform vec2 uResolution;
 
-// Minimal horizontal dither-merge, in SNES-pixel units (uResolution is
-// the 256x224 source, so 1.0/uResolution.x is one SNES pixel). SNES
-// games routinely use per-pixel dithering for pseudo-transparency (e.g.
-// Super Mario World's title background), designed to be merged by a
-// CRT's finite horizontal bandwidth into a smooth translucent tone.
-// This 3-tap [0.25, 0.5, 0.25] kernel is the LIGHTEST filter that still
-// fully merges the common 2-pixel dither period (an A/B/A/B pattern
-// averages to exactly (A+B)/2 at every pixel), while keeping half of
-// every pixel's own color -- an earlier 5-tap version with only 30%
-// center weight smeared 16-pixel-wide sprites (Mario, enemies) into
-// unrecognizable blurs.
+// True passthrough: one texel, no filtering kernel. Earlier versions
+// applied a horizontal dither-merge blur here (3-tap, and before that
+// 5-tap) to imitate a CRT's bandwidth merging SNES pseudo-transparency
+// dithers -- but it visibly softened every sprite and tile edge, and the
+// crisp image matters more than merging dither patterns. CRT-style
+// smoothing belongs in the dedicated CRT shader, not in the default path.
 void main() {
-  float tx = 1.0 / uResolution.x;
-  vec4 c = texture(uTexture, vTexCoord) * 0.5;
-  c += texture(uTexture, vTexCoord + vec2(tx, 0.0)) * 0.25;
-  c += texture(uTexture, vTexCoord - vec2(tx, 0.0)) * 0.25;
-  fragColor = c;
+  fragColor = texture(uTexture, vTexCoord);
 }
 `;

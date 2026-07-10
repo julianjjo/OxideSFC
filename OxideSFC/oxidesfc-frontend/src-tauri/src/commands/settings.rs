@@ -23,7 +23,9 @@ impl Default for VideoSettings {
             frame_limit: "60".to_string(),
             renderer: "webgl".to_string(),
             shader: "none".to_string(),
-            scale_mode: "bilinear".to_string(),
+            // Nearest keeps the SNES's 256x224 pixels crisp when scaled up;
+            // bilinear visibly blurs sprites and tile edges.
+            scale_mode: "nearest".to_string(),
         }
     }
 }

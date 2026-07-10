@@ -205,7 +205,7 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
       const renderer = new WebGLRenderer(canvasRef.current, {
         width: 512,
         height: 480,
-        scaleMode: (settings.video?.scale_mode as 'nearest' | 'bilinear' | 'xbrz' | 'hq2x') || 'bilinear',
+        scaleMode: (settings.video?.scale_mode as 'nearest' | 'bilinear' | 'xbrz' | 'hq2x') || 'nearest',
         crtMode: false,
       });
 
@@ -247,7 +247,7 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
     if (!rendererRef.current) return;
     
     rendererRef.current.setOptions({
-      scaleMode: (settings.video?.scale_mode as 'nearest' | 'bilinear' | 'xbrz' | 'hq2x') || 'bilinear',
+      scaleMode: (settings.video?.scale_mode as 'nearest' | 'bilinear' | 'xbrz' | 'hq2x') || 'nearest',
       crtMode: settings.video?.shader === 'crt',
     });
   }, [settings.video?.scale_mode, settings.video?.shader]);

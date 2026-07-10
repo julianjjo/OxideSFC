@@ -66,7 +66,7 @@ export class WebGLRenderer {
     this.options = {
       width: 512,
       height: 480,
-      scaleMode: 'bilinear',
+      scaleMode: 'nearest',
       crtMode: false,
       ...options,
     };
@@ -191,8 +191,10 @@ export class WebGLRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    // Match the default scaleMode ('nearest') so the first frames aren't
+    // bilinear-smoothed before setOptions() runs.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
     // Create framebuffer for multi-pass rendering
     this.framebuffer = gl.createFramebuffer();

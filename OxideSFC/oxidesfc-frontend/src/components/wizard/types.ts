@@ -141,7 +141,7 @@ export const DEFAULT_WIZARD_FORM_DATA: WizardFormData = {
     vsync: true,
     renderer: 'webgl',
     shader: 'none',
-    scaleMode: 'bilinear',
+    scaleMode: 'nearest',
   },
   audioSettings: {
     enabled: true,
