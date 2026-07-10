@@ -51,6 +51,21 @@ pub fn get_audio_samples(state: State<AppState>) -> Result<Vec<i16>, String> {
     Ok(emulation.get_audio())
 }
 
+/// Sets the emulation speed multiplier (1.0 = real NTSC speed; clamped to
+/// 0.1-4.0 by the controller). Returns the value actually applied.
+#[tauri::command]
+pub fn set_emulation_speed(speed: f64, state: State<AppState>) -> Result<f64, String> {
+    let mut emulation = state.emulation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    emulation.set_speed(speed);
+    Ok(emulation.get_speed())
+}
+
+#[tauri::command]
+pub fn get_emulation_speed(state: State<AppState>) -> Result<f64, String> {
+    let emulation = state.emulation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(emulation.get_speed())
+}
+
 #[tauri::command]
 pub fn set_input_state(input: InputState, state: State<AppState>) -> Result<(), String> {
     debug!("Setting input state: {:?}", input);

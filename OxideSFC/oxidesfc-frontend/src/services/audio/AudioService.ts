@@ -48,6 +48,15 @@ export class AudioService {
   private ringCount = 0;
   private lastSampleL = 0;
   private lastSampleR = 0;
+  /// Playback-rate multiplier, kept in sync with the emulation speed: the
+  /// emulator produces speed*32000 samples per wall second, so the output
+  /// must consume the ring at the same factor (with linear interpolation
+  /// between source samples) or it would drift into overflow/underrun.
+  /// This also means pitch and tempo scale with speed, like a real
+  /// overclocked console -- which is the point of the speed control.
+  private playbackRate = 1.0;
+  /// Fractional position between ringRead and ringRead+1 (0..1).
+  private readFrac = 0;
   
   // Callback to get audio samples from emulation
   private getAudioSamples: ((count: number) => Promise<number[]>) | null = null;
@@ -139,11 +148,20 @@ export class AudioService {
     for (let frame = 0; frame < frameCount; frame++) {
       let left: number;
       let right: number;
-      if (this.ringCount > 0) {
-        left = this.ringL[this.ringRead];
-        right = this.ringR[this.ringRead];
-        this.ringRead = (this.ringRead + 1) % ringLen;
-        this.ringCount--;
+      if (this.ringCount > 1) {
+        // Linear interpolation between the current and next queued frame,
+        // stepping the read position by playbackRate per output sample so
+        // consumption matches the emulator's production rate at any speed.
+        const next = (this.ringRead + 1) % ringLen;
+        const f = this.readFrac;
+        left = this.ringL[this.ringRead] * (1 - f) + this.ringL[next] * f;
+        right = this.ringR[this.ringRead] * (1 - f) + this.ringR[next] * f;
+        this.readFrac += this.playbackRate;
+        while (this.readFrac >= 1 && this.ringCount > 1) {
+          this.readFrac -= 1;
+          this.ringRead = (this.ringRead + 1) % ringLen;
+          this.ringCount--;
+        }
         this.lastSampleL = left;
         this.lastSampleR = right;
       } else {
@@ -224,8 +242,24 @@ export class AudioService {
     this.ringRead = 0;
     this.ringWrite = 0;
     this.ringCount = 0;
+    this.readFrac = 0;
     this.lastSampleL = 0;
     this.lastSampleR = 0;
+  }
+
+  /**
+   * Set the playback-rate multiplier (kept in sync with the emulation
+   * speed by the caller). 1.0 = normal.
+   */
+  setPlaybackRate(rate: number): void {
+    this.playbackRate = Math.max(0.1, Math.min(4, rate));
+  }
+
+  /**
+   * Get the current playback-rate multiplier.
+   */
+  getPlaybackRate(): number {
+    return this.playbackRate;
   }
 
   /**

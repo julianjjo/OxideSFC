@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useEmulationStore } from '../../stores/emulationStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { WebGLRenderer } from '../../services/renderer';
@@ -34,6 +35,32 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
   const [showMenu, setShowMenu] = useState(false);
   const [webglStatus, setWebglStatus] = useState<string>('');
   const [audioStatus, setAudioStatus] = useState<string>('');
+  // Emulation speed multiplier (1.00 = real NTSC speed). Applied on the
+  // backend (wall-clock frame pacing) AND to the audio service's playback
+  // rate, so pitch/tempo follow the game speed like a real console would.
+  const [speed, setSpeed] = useState(1.0);
+
+  const applySpeed = useCallback(async (value: number) => {
+    const requested = Math.round(Math.max(0.1, Math.min(4, value)) * 100) / 100;
+    try {
+      const applied = await invoke<number>('set_emulation_speed', { speed: requested });
+      setSpeed(applied);
+      audioServiceRef.current?.setPlaybackRate(applied);
+    } catch (error) {
+      console.error('Failed to set emulation speed:', error);
+    }
+  }, []);
+
+  // Pick up whatever speed the backend already has (it persists across
+  // view unmounts within a session) and mirror it into the audio service.
+  useEffect(() => {
+    invoke<number>('get_emulation_speed')
+      .then((value) => {
+        setSpeed(value);
+        audioServiceRef.current?.setPlaybackRate(value);
+      })
+      .catch(() => {});
+  }, []);
 
   // Input mapping
   //
@@ -482,6 +509,33 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
           <span className="text-sm text-gray-400">
             {isPaused ? 'PAUSED' : 'RUNNING'}
           </span>
+        </div>
+
+        {/* Speed control: -/+ in 0.05x steps, click the value to reset to
+            1.00x. Backend pacing and audio playback rate move together. */}
+        <div className="flex items-center gap-1 text-sm">
+          <span className="text-gray-400 mr-1">Speed</span>
+          <button
+            onClick={() => applySpeed(speed - 0.05)}
+            className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded"
+            title="Slower (-0.05x)"
+          >
+            −
+          </button>
+          <button
+            onClick={() => applySpeed(1.0)}
+            className={`px-2 py-1 rounded font-mono min-w-[4.5rem] text-center ${speed === 1.0 ? 'text-gray-300' : 'text-yellow-400'}`}
+            title="Reset to 1.00x"
+          >
+            {speed.toFixed(2)}x
+          </button>
+          <button
+            onClick={() => applySpeed(speed + 0.05)}
+            className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded"
+            title="Faster (+0.05x)"
+          >
+            +
+          </button>
         </div>
 
         <div className="flex items-center gap-2">

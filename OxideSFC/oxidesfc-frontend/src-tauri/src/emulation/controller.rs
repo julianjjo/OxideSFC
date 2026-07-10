@@ -270,6 +270,20 @@ pub struct EmulationController {
     /// pause (or a stop after a pause) can't double-count the same elapsed
     /// interval.
     session_start: Option<Instant>,
+    /// Emulation speed multiplier (1.0 = real NTSC speed). `step_frame()`
+    /// paces by wall-clock time * this factor, so the game runs at the
+    /// same speed regardless of the caller's invocation rate (the frontend
+    /// calls once per requestAnimationFrame, i.e. at MONITOR refresh rate
+    /// -- before this pacing existed, a 144Hz display ran the game 2.4x
+    /// too fast).
+    speed: f64,
+    /// Fractional emulated frames owed but not yet stepped, carried
+    /// between `step_frame()` calls so pacing loses no time to rounding.
+    frame_debt: f64,
+    /// Wall-clock time of the previous `step_frame()` call. `None` after
+    /// start/pause/resume so the first paced call steps exactly one frame
+    /// instead of "catching up" across the gap.
+    last_pace: Option<Instant>,
 }
 
 impl EmulationController {
@@ -283,7 +297,23 @@ impl EmulationController {
             audio_buffer: Vec::new(),
             current_game_id: None,
             session_start: None,
+            speed: 1.0,
+            frame_debt: 0.0,
+            last_pace: None,
         }
+    }
+
+    /// Sets the emulation speed multiplier, clamped to a sane range. The
+    /// frontend exposes this so the play speed can be tuned live (and the
+    /// audio service scales its playback rate by the same factor, so pitch
+    /// and tempo follow, like overclocking a real console).
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = speed.clamp(0.1, 4.0);
+        info!("Emulation speed set to {:.2}x", self.speed);
+    }
+
+    pub fn get_speed(&self) -> f64 {
+        self.speed
     }
 
     pub fn load_rom(&mut self, path: &str) -> Result<GameInfo, String> {
@@ -413,6 +443,8 @@ impl EmulationController {
         self.is_paused = false;
         self.current_game_id = game_id;
         self.session_start = Some(Instant::now());
+        self.last_pace = None;
+        self.frame_debt = 0.0;
         info!("Emulation started");
         Ok(())
     }
@@ -450,6 +482,9 @@ impl EmulationController {
         // Restart the play-time clock -- the previous running interval was
         // already flushed by whichever pause() call led here.
         self.session_start = Some(Instant::now());
+        // Restart the pacing clock too, so the pause gap isn't "caught up".
+        self.last_pace = None;
+        self.frame_debt = 0.0;
         info!("Emulation resumed");
         Ok(())
     }
@@ -499,19 +534,58 @@ impl EmulationController {
         }
     }
 
-    /// Advances the emulation by one full video frame and refreshes
-    /// `current_frame`/`audio_buffer` once at the end. This is what
-    /// frame-driven callers (the `get_video_frame` Tauri command, invoked
-    /// once per displayed frame) should use instead of `step()` --
-    /// `step()` only advances a single CPU instruction, which would make
-    /// the emulation crawl at a tiny fraction of real speed if called
-    /// once per displayed frame.
+    /// Advances the emulation by however many video frames real time (and
+    /// the speed multiplier) say are due, refreshing `current_frame` and
+    /// draining audio once per stepped frame.
+    ///
+    /// This is deliberately WALL-CLOCK paced rather than
+    /// one-frame-per-call: the caller (`get_video_frame`, invoked once per
+    /// requestAnimationFrame) runs at the MONITOR's refresh rate, so a
+    /// call-paced version played at whatever Hz the display happened to be
+    /// -- 2.4x too fast on a 144Hz panel, too slow in a throttled
+    /// background tab. Here a 144Hz caller simply steps 0 frames on most
+    /// calls and 1 on the rest, averaging the NTSC 60.0988 fps times
+    /// `self.speed`.
     pub fn step_frame(&mut self) {
+        if self.snes.is_none() || !self.is_running || self.is_paused {
+            return;
+        }
+
+        const NTSC_FPS: f64 = 60.0988;
+        let now = Instant::now();
+        let elapsed = match self.last_pace {
+            // Cap the gap so a stall (debugger, OS sleep, long GC pause)
+            // doesn't queue a huge catch-up burst.
+            Some(prev) => (now - prev).as_secs_f64().min(0.1),
+            None => 1.0 / NTSC_FPS,
+        };
+        self.last_pace = Some(now);
+        self.frame_debt += elapsed * NTSC_FPS * self.speed;
+
+        // Never step more than a handful of frames per call: if the host
+        // can't keep up, dropping the debt (running slow) beats spiraling
+        // further behind.
+        let frames = (self.frame_debt as u32).min(6);
+        self.frame_debt -= frames as f64;
+        if frames == 6 {
+            self.frame_debt = self.frame_debt.min(1.0);
+        }
+
+        self.step_frames_now(frames);
+    }
+
+    /// Steps exactly `frames` video frames, unconditionally (the
+    /// running/paused gate lives in the paced `step_frame()`). Split out
+    /// so tests can advance a deterministic number of frames without
+    /// depending on wall-clock pacing.
+    fn step_frames_now(&mut self, frames: u32) {
         if let Some(ref mut snes) = self.snes {
-            if self.is_running && !self.is_paused {
+            for _ in 0..frames {
                 snes.step_until_frame_ready();
+                self.audio_buffer.extend(snes.get_audio_samples(4096));
+            }
+            if frames > 0 {
                 self.current_frame = snes.get_frame();
-                self.audio_buffer.extend(snes.get_audio_samples(2048));
             }
         }
     }
@@ -720,7 +794,10 @@ mod real_rom_tests {
         let before = controller.get_frame();
         assert_eq!(before.data.len(), 0, "freshly loaded ROM must not have a rendered frame yet");
 
-        controller.step_frame();
+        // Deterministic single frame -- the public `step_frame()` is
+        // wall-clock paced (0 or more frames per call), which a unit test
+        // must not depend on.
+        controller.step_frames_now(1);
 
         let after = controller.get_frame();
         assert_eq!(
@@ -754,23 +831,20 @@ mod real_rom_tests {
         controller.load_rom(&rom_path_str()).expect("ROM must load");
         controller.start(None).expect("must be able to start after loading");
 
-        for _ in 0..5 {
-            controller.step_frame();
-        }
+        controller.step_frames_now(5);
 
         let audio = controller.get_audio();
         assert!(
             !audio.is_empty(),
             "get_audio() must return real samples once the DSP has had time to generate them, not an empty Vec"
         );
-        // `step_frame()` appends up to 2048 samples to `audio_buffer` each
-        // call (see its own doc comment on why it must accumulate rather
-        // than overwrite: any samples not yet drained via `get_audio()`
-        // since the previous frame must not be discarded). Draining once
+        // Each stepped frame drains up to 4096 samples into `audio_buffer`
+        // (which accumulates rather than overwrites: samples not yet
+        // drained via `get_audio()` must not be discarded). Draining once
         // after 5 undrained frames can therefore legitimately return up to
-        // 5 * 2048 samples, not just one frame's worth.
+        // 5 * 4096 samples, not just one frame's worth.
         assert!(
-            audio.len() <= 2048 * 5,
+            audio.len() <= 4096 * 5,
             "get_audio() must not return more than the accumulated per-frame sample budget across the undrained frames, got {}",
             audio.len()
         );
@@ -846,6 +920,18 @@ mod real_rom_tests {
     }
 
     #[test]
+    fn emulation_speed_is_clamped_to_a_sane_range() {
+        let mut controller = EmulationController::new();
+        assert_eq!(controller.get_speed(), 1.0, "default speed must be exactly 1.0 (real NTSC)");
+        controller.set_speed(99.0);
+        assert_eq!(controller.get_speed(), 4.0, "speed must clamp to the 4.0 upper bound");
+        controller.set_speed(0.0);
+        assert_eq!(controller.get_speed(), 0.1, "speed must clamp to the 0.1 lower bound");
+        controller.set_speed(1.25);
+        assert_eq!(controller.get_speed(), 1.25);
+    }
+
+    #[test]
     fn save_state_round_trips_a_running_real_rom() {
         // Boot the real ROM, advance it, snapshot, advance further (so the
         // machine state genuinely diverges), then restore -- the CPU and
@@ -858,9 +944,7 @@ mod real_rom_tests {
         controller.load_rom(&rom_path_str()).expect("ROM must load");
         controller.start(None).expect("must start");
 
-        for _ in 0..5 {
-            controller.step_frame();
-        }
+        controller.step_frames_now(5);
 
         let (saved_state, saved_pc, saved_a, saved_wram_probe) = {
             let snes = controller.snes.as_mut().unwrap();
@@ -872,9 +956,7 @@ mod real_rom_tests {
         };
         assert!(!saved_state.is_empty(), "the snapshot must not be the old empty stub");
 
-        for _ in 0..5 {
-            controller.step_frame();
-        }
+        controller.step_frames_now(5);
 
         {
             let snes = controller.snes.as_mut().unwrap();
@@ -888,7 +970,7 @@ mod real_rom_tests {
         }
 
         // And the restored machine must keep executing normally.
-        controller.step_frame();
+        controller.step_frames_now(1);
         assert!(!controller.is_halted(), "a restored machine must keep running");
     }
 
@@ -969,6 +1051,7 @@ mod real_rom_tests {
         };
         controller.step();
         controller.step_frame();
+        controller.step_frames_now(1);
         let pc_after = {
             let snes = controller.snes.as_ref().unwrap();
             ((snes.cpu.pb as u32) << 16) | (snes.cpu.pc as u32)

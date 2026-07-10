@@ -144,6 +144,8 @@ pub fn run() {
             commands::emulation::stop_emulation,
             commands::emulation::get_video_frame,
             commands::emulation::get_audio_samples,
+            commands::emulation::set_emulation_speed,
+            commands::emulation::get_emulation_speed,
             commands::emulation::set_input_state,
             commands::emulation::save_state,
             commands::emulation::load_state,
