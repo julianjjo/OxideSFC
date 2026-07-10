@@ -2387,15 +2387,16 @@ pub struct Apu {
     sample_divider: u32,
     sample_counter: u32,
 
-    /// Fractional main-CPU cycles not yet converted into an SPC700 step,
-    /// carried over between `tick()` calls. Without this, converting via
-    /// per-call integer division (`cycles / 3`) discards up to 2 of every
-    /// 3 cycles on nearly every call, since most 65816 instructions take
-    /// only 2-4 cycles -- starving the SPC700 relative to real hardware
-    /// and making the main CPU's "wait for SPC ready" polling loops (e.g.
-    /// the SPC upload handshake) spin for far longer than a real frame's
-    /// worth of time, long enough for a second NMI to fire while still
-    /// inside the previous NMI handler and corrupt the stack.
+    /// Fractional SPC700-step remainder carried between `tick()` calls,
+    /// scaled by the exact clock-ratio denominator (see `tick`). The
+    /// SPC700 has its OWN 24.576MHz crystal and steps at 1.024MHz -- it is
+    /// not an integer division of the main clock. An earlier version used
+    /// `cycles / 3` of the ~2.6847MHz pacing unit (= 894.9kHz), which ran
+    /// the SPC700 -- and therefore its 8kHz/64kHz timers, i.e. the music
+    /// driver's tempo -- 12.6% slow. Carrying the remainder (rather than
+    /// truncating per call) also matters: without it the "wait for SPC
+    /// ready" handshake loops spun long enough for a second NMI to fire
+    /// inside the previous handler and corrupt the stack.
     spc_cycle_debt: u32,
 }
 
@@ -2420,15 +2421,17 @@ impl Apu {
             // APU runs at ~24.576 MHz
             // 24576000 / 60.1 ≈ 409200 cycles per frame
             cycles_per_frame: 409200,
-            // Sample at ~32kHz relative to the main CPU's assumed ~2.68MHz
-            // SlowROM rate (the same clock `SystemBus::tick_ppu`'s "2
-            // dots/cycle" ratio assumes): 2,680,000 / 32,000 ~= 84 main
-            // cycles per audio sample. This used to be `3`, confusing the
-            // *SPC700's* main-cycle ratio (used correctly a few lines
-            // below for `spc_cycle_debt`) with the audio sample rate --
-            // 1/3 of ~2.68MHz is ~893kHz, not 32kHz, so samples were being
-            // generated ~28x too fast.
-            sample_divider: 84,
+            // One DSP sample every 32 SPC700 cycle-steps: the real DSP is
+            // hard-wired to the SPC700's 1.024MHz clock and outputs at
+            // exactly 1,024,000 / 32 = 32,000 Hz. This used to be 84 (a
+            // "main cycles per sample" calibration against the pacing
+            // unit), which produced ~31,866 effective Hz -- close, but the
+            // constant 0.4% shortfall versus the frontend's 32kHz playback
+            // meant the audio buffer drained slightly faster than it
+            // filled, causing a periodic underrun (heard as stutter).
+            // (Much earlier it was `3`, which generated samples ~28x too
+            // fast.)
+            sample_divider: 32,
             sample_counter: 0,
             spc_cycle_debt: 0,
         };
@@ -2554,23 +2557,26 @@ impl Apu {
     pub fn tick(&mut self, cycles: u32) {
         self.frame_cycles += cycles;
 
-        // Run SPC700 for these cycles (~1/3 the main CPU speed). Accumulate
-        // the fractional remainder across calls instead of truncating it
-        // away each time -- see `spc_cycle_debt`'s doc comment for why a
-        // naive per-call `cycles / 3` starves the SPC700.
-        self.spc_cycle_debt += cycles;
-        let spc_cycles = self.spc_cycle_debt / 3;
-        self.spc_cycle_debt %= 3;
+        // Convert pacing-unit cycles (master/8 = 21,477,272/8 = 2,684,659
+        // Hz -- the unit `SystemBus::tick_master` feeds this in) into
+        // SPC700 cycle-steps at the SPC700's true 1.024MHz rate (its own
+        // 24.576MHz crystal / 24), carrying the exact fractional
+        // remainder across calls. The intermediate product is computed in
+        // u64 because a large DMA can tick tens of thousands of unit
+        // cycles at once.
+        let debt = self.spc_cycle_debt as u64 + cycles as u64 * 1_024_000;
+        let spc_cycles = (debt / 2_684_659) as u32;
+        self.spc_cycle_debt = (debt % 2_684_659) as u32;
         for _ in 0..spc_cycles {
             self.spc700.step();
         }
-        
-        // Generate audio samples
-        // Sample rate is about 32kHz
-        self.sample_counter += cycles;
+
+        // The DSP is clocked by the SPC700: one stereo sample per 32
+        // SPC700 cycles = exactly 32,000 samples per emulated second.
+        self.sample_counter += spc_cycles;
         while self.sample_counter >= self.sample_divider {
             self.sample_counter -= self.sample_divider;
-            
+
             // Generate DSP sample
             let (left, right) = {
                 let ram = self.ram.lock().unwrap();
@@ -2783,11 +2789,18 @@ mod tests {
     /// land close to 32,000 samples, not orders of magnitude off in either
     /// direction.
     #[test]
-    fn tick_generates_samples_at_approximately_32khz_not_the_old_28x_too_fast_rate() {
+    fn tick_generates_samples_at_exactly_32khz_not_the_old_28x_too_fast_rate() {
+        // One emulated second of the pacing unit (master/8) must produce
+        // exactly 32,000 samples: 2,684,659 unit cycles -> 1,024,000
+        // SPC700 steps -> /32 = 32,000. The exact-ratio conversion makes
+        // this deterministic to +/-1 sample regardless of chunking. The
+        // old divider-84 pacing produced ~31,960 (0.4% slow -> steady
+        // frontend buffer underrun = periodic stutter); the ancient
+        // divider-3 bug produced ~893,000.
         let mut apu = Apu::new();
-        const ONE_SECOND_OF_MAIN_CPU_CYCLES: u32 = 2_680_000;
+        const ONE_SECOND_OF_UNIT_CYCLES: u32 = 2_684_659;
         const CHUNK: u32 = 1000;
-        let mut remaining = ONE_SECOND_OF_MAIN_CPU_CYCLES;
+        let mut remaining = ONE_SECOND_OF_UNIT_CYCLES;
         while remaining > 0 {
             let step = remaining.min(CHUNK);
             apu.tick(step);
@@ -2796,11 +2809,46 @@ mod tests {
 
         let generated = apu.buffer_size();
         assert!(
-            (30_000..=34_000).contains(&generated),
-            "expected ~32,000 samples for one second of main-CPU-cycle ticking, got {} \
-             (a value near 893,000 would mean the old too-fast divider regressed)",
+            (31_999..=32_001).contains(&generated),
+            "expected exactly ~32,000 samples for one emulated second, got {}",
             generated
         );
+    }
+
+    #[test]
+    fn spc700_timers_tick_at_the_real_8khz_rate() {
+        // The SPC700 runs on its own 24.576MHz crystal at 1.024MHz --
+        // NOT an integer fraction of the main clock. Timer 0/1's stage-1
+        // divider advances every 128 SPC700 cycles = exactly 8000/sec, and
+        // the music driver's tempo hangs directly off this rate. The old
+        // `unit / 3` conversion stepped the SPC700 at 894.9kHz, making the
+        // timers (and therefore all music) run 12.6% slow.
+        //
+        // One emulated second: 8000 stage-1 increments. With target 0
+        // (=256), the 4-bit counter increments floor(8000/256) = 31 times
+        // (31 & 0x0F = 15) and the divider is left at 8000 % 256 = 64.
+        let mut apu = Apu::new();
+        apu.spc700.timer_enable[0] = true;
+        apu.spc700.timer_target[0] = 0;
+        apu.spc700.timer_divider[0] = 0;
+        apu.spc700.timer_counter[0] = 0;
+        apu.spc700.timer_prescaler[0] = 0;
+
+        const ONE_SECOND_OF_UNIT_CYCLES: u32 = 2_684_659;
+        const CHUNK: u32 = 977; // deliberately awkward chunk size
+        let mut remaining = ONE_SECOND_OF_UNIT_CYCLES;
+        while remaining > 0 {
+            let step = remaining.min(CHUNK);
+            apu.tick(step);
+            remaining -= step;
+        }
+
+        assert_eq!(
+            apu.spc700.timer_divider[0], 64,
+            "timer 0 stage-1 must have advanced exactly 8000 times in one emulated second \
+             (8000 %% 256 = 64) -- the old 894.9kHz SPC700 clock left it at 6991 %% 256 = 79"
+        );
+        assert_eq!(apu.spc700.timer_counter[0], 15, "floor(8000/256) = 31 -> 31 & 0x0F = 15");
     }
 
     #[test]

@@ -6,13 +6,13 @@
 /// 
 /// NTSC Specifications:
 /// - Scanlines: 262 per frame
-/// - Horizontal period: ~340 pixels per scanline
+/// - Horizontal period: 341 dots per scanline
 /// - Vertical blanking: lines 225-262
 /// - Base resolution: 256×224
 /// 
 /// PAL Specifications:
 /// - Scanlines: 312 per frame
-/// - Horizontal period: ~340 pixels per scanline
+/// - Horizontal period: 341 dots per scanline
 /// - Vertical blanking: lines 241-312
 /// - Base resolution: 256×240
 
@@ -462,12 +462,18 @@ impl Ppu {
         }
     }
 
-    /// Gets the number of pixels per scanline
-    /// 
+    /// Gets the number of dots per scanline
+    ///
     /// # Returns
-    /// 340 pixels per scanline (including hblank)
+    /// 341 dots per scanline (including hblank). This is the real
+    /// hardware count (dot positions 0-340, 1364 master cycles at 4
+    /// master cycles per dot): 341 x 262 x 4 = 357,368 master cycles per
+    /// frame = the canonical 60.0988 NTSC frame rate. The previous value
+    /// of 340 made every emulated frame 0.29% shorter than real time, so
+    /// everything paced off frames-per-wall-second (notably the 32kHz
+    /// audio stream) fell 0.29% behind and periodically underran.
     pub const fn pixels_per_line() -> u16 {
-        340
+        341
     }
 
     /// Gets the visible scanlines (not in vblank)
@@ -636,8 +642,8 @@ mod tests {
     fn ppu_frame_complete() {
         let mut ppu = Ppu::new();
         
-        // Advance to end of frame (262 scanlines * 340 pixels)
-        let pixels_per_frame = 262u32 * 340;
+        // Advance to end of frame (262 scanlines * 341 dots)
+        let pixels_per_frame = 262u32 * 341;
         
         for _ in 0..pixels_per_frame {
             ppu.tick();
@@ -654,7 +660,7 @@ mod tests {
         let mut ppu = Ppu::new();
         
         // Advance to end of frame
-        for _ in 0..(262 * 340) {
+        for _ in 0..(262 * 341) {
             ppu.tick();
         }
         
@@ -670,7 +676,7 @@ mod tests {
         let mut ppu = Ppu::new();
         
         // Scanline 224 starts vblank for NTSC
-        for _ in 0..(224 * 340) {
+        for _ in 0..(224 * 341) {
             ppu.tick();
         }
         
@@ -761,6 +767,6 @@ mod tests {
 
     #[test]
     fn ppu_constants() {
-        assert_eq!(Ppu::pixels_per_line(), 340);
+        assert_eq!(Ppu::pixels_per_line(), 341);
     }
 }

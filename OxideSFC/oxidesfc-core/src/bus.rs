@@ -2146,13 +2146,13 @@ mod tests {
         // Cross one scanline boundary and land at h_counter == 0 (NOT
         // HTIME's 100) -- must NOT fire. This is exactly what the bug got
         // wrong (it fired unconditionally on every boundary).
-        bus.tick_ppu(340 / 2); // one full scanline: h_counter 0 -> 0
+        bus.tick_master(341 * 4); // one full scanline: h_counter 0 -> 0
         assert!(!bus.irq_pending(), "H-IRQ must not fire at a scanline boundary that isn't HTIME");
 
         // Cross the next boundary and land exactly at h_counter == HTIME
-        // (340 + 100 dots, in one tick_ppu call so exactly one boundary is
+        // (341 + 100 dots, in one tick so exactly one boundary is
         // crossed and the final h_counter is 100) -- must fire.
-        bus.tick_ppu((340 + 100) / 2);
+        bus.tick_master((341 + 100) * 4);
         assert!(bus.irq_pending(), "H-IRQ must fire once a scanline boundary lands the H-position at HTIME");
 
         // Acknowledge, then cross one more boundary landing at h_counter
@@ -2161,7 +2161,7 @@ mod tests {
         // asserted the line regardless of position.
         assert_eq!(bus.read_u8(0x004211).unwrap() & 0x80, 0x80);
         assert!(!bus.irq_pending());
-        bus.tick_ppu((340 - 100 + 50) / 2); // finish this line (240 dots) + 50 dots into the next
+        bus.tick_master((341 - 100 + 50) * 4); // finish this line (241 dots) + 50 dots into the next
         assert!(!bus.irq_pending(), "landing at h_counter=50 (!= HTIME) must not fire");
     }
 
@@ -2178,11 +2178,11 @@ mod tests {
         bus.write_u8(0x004200, 0x20).unwrap(); // V-IRQ enable
         assert!(!bus.irq_pending(), "no IRQ before the target scanline");
 
-        bus.tick_ppu(100 * 340 / 2); // advance exactly 100 scanlines
+        bus.tick_master(100 * 341 * 4); // advance exactly 100 scanlines
         assert!(bus.irq_pending(), "IRQ line must assert at scanline == VTIME");
 
         // Still asserted until acknowledged...
-        bus.tick_ppu(340 / 2);
+        bus.tick_master(341 * 4);
         assert!(bus.irq_pending());
         // ...reading $4211 reports bit 7 and acks.
         assert_eq!(bus.read_u8(0x004211).unwrap() & 0x80, 0x80);
@@ -2194,7 +2194,7 @@ mod tests {
         bus2.write_u8(0x004209, 50).unwrap();
         bus2.write_u8(0x00420A, 0).unwrap();
         bus2.write_u8(0x004200, 0x20).unwrap();
-        bus2.tick_ppu(60 * 340 / 2);
+        bus2.tick_master(60 * 341 * 4);
         assert!(bus2.irq_pending());
         bus2.write_u8(0x004200, 0x80).unwrap(); // NMI only, timer IRQs off
         assert!(!bus2.irq_pending(), "clearing $4200 bits 4-5 must ack a pending IRQ");
@@ -2484,7 +2484,9 @@ mod tests {
     /// intermediate ones (see `tick_past_one_vblank_entry`'s doc comment
     /// for the same caveat).
     fn tick_dots(bus: &mut SystemBus, dots: u32) {
-        bus.tick_ppu(dots / 2);
+        // 4 master cycles per dot -- dot-granular, so odd counts (a real
+        // scanline is 341 dots) advance exactly.
+        bus.tick_master(dots * 4);
     }
 
     #[test]
@@ -2517,18 +2519,18 @@ mod tests {
         // Before any HDMA has run, VRAM must still be untouched.
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0x00);
 
-        tick_dots(&mut bus, 230 * 340); // into vblank (scanline 230)
-        tick_dots(&mut bus, 32 * 340); // exit vblank -> scanline 0, dot 0: hdma_init() fires
+        tick_dots(&mut bus, 230 * 341); // into vblank (scanline 230)
+        tick_dots(&mut bus, 32 * 341); // exit vblank -> scanline 0, dot 0: hdma_init() fires
         tick_dots(&mut bus, 258); // scanline 0 hblank-entry: 1st transfer (line-count 2->1)
 
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0xAA, "line 1 of the repeat entry must write the table's data byte");
 
-        tick_dots(&mut bus, 340 - 258); // scanline 1, dot 0 (clears the hblank edge flag)
+        tick_dots(&mut bus, 341 - 258); // scanline 1, dot 0 (clears the hblank edge flag)
         tick_dots(&mut bus, 258); // scanline 1 hblank-entry: 2nd transfer (line-count 1->0, reloads next entry -> reads 0x00 -> terminates)
 
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0002), 0xAA, "line 2 of the repeat entry must reuse the same data byte, at the auto-incremented VRAM address");
 
-        tick_dots(&mut bus, 340 - 258); // scanline 2, dot 0
+        tick_dots(&mut bus, 341 - 258); // scanline 2, dot 0
         tick_dots(&mut bus, 258); // scanline 2 hblank-entry: channel is terminated, must not transfer again
 
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0004), 0x00, "a terminated channel must not keep transferring into subsequent scanlines");
@@ -2555,12 +2557,12 @@ mod tests {
         bus.write_u8(0x004304, 0x7E).unwrap();
         bus.write_u8(0x00420C, 0x01).unwrap();
 
-        tick_dots(&mut bus, 230 * 340);
-        tick_dots(&mut bus, 32 * 340);
+        tick_dots(&mut bus, 230 * 341);
+        tick_dots(&mut bus, 32 * 341);
         tick_dots(&mut bus, 258);
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0x11);
 
-        tick_dots(&mut bus, 340 - 258);
+        tick_dots(&mut bus, 341 - 258);
         tick_dots(&mut bus, 258);
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0002), 0x22, "a no-repeat entry must advance to the next table byte for each line");
     }
@@ -2596,8 +2598,8 @@ mod tests {
 
         bus.write_u8(0x00420C, 0x01).unwrap(); // arm channel 0
 
-        tick_dots(&mut bus, 230 * 340);
-        tick_dots(&mut bus, 32 * 340); // vblank-exit: hdma_init loads the entry
+        tick_dots(&mut bus, 230 * 341);
+        tick_dots(&mut bus, 32 * 341); // vblank-exit: hdma_init loads the entry
         tick_dots(&mut bus, 258); // scanline 0 hblank-entry: transfers both bytes
 
         assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0x11, "1st byte, read from $7E:FFFF");
@@ -2612,13 +2614,13 @@ mod tests {
     // ========================================================================
 
     /// Ticks the bus forward to land just inside vblank (NTSC: scanline 224
-    /// of 262, 340 dots/line), which is what actually latches the
+    /// of 262, 341 dots/line), which is what actually latches the
     /// auto-joypad-read result into $4218/$4219 (see `tick_ppu`). Must not
     /// overshoot past scanline 262 back into the next frame's active
     /// scanlines, since `tick_ppu` only compares vblank state once per
     /// call (before vs. after the whole batch), not per-scanline within it.
     fn tick_past_one_vblank_entry(bus: &mut SystemBus) {
-        const DOTS_TO_MIDDLE_OF_VBLANK: u32 = 230 * 340; // scanline 230, safely within 224-261
+        const DOTS_TO_MIDDLE_OF_VBLANK: u32 = 230 * 341; // scanline 230, safely within 224-261
         bus.tick_ppu(DOTS_TO_MIDDLE_OF_VBLANK / 2); // tick_ppu doubles cycles to dots
     }
 
@@ -2790,7 +2792,7 @@ mod tests {
         let mut bus = SystemBus::new();
         bus.write_u8(0x004200, 0x01).unwrap(); // auto-joypad-read enable
         bus.set_joypad2_state(0x8010); // B + R
-        tick_dots(&mut bus, 225 * 340); // cross the vblank-entry edge
+        tick_dots(&mut bus, 225 * 341); // cross the vblank-entry edge
         assert_eq!(bus.read_u8(0x00421A).unwrap(), 0x10, "JOY2L must hold the low byte of the latch");
         assert_eq!(bus.read_u8(0x00421B).unwrap(), 0x80, "JOY2H must hold the high byte of the latch");
     }
@@ -2930,7 +2932,7 @@ mod tests {
         let expected_dots = expected_master / 4; // 4 master cycles per dot
         let h_after = bus.ppu_ref().h_counter();
         assert_eq!(
-            (h_after as u32 + 340 - h_before as u32) % 340,
+            (h_after as u32 + 341 - h_before as u32) % 341,
             expected_dots % 340,
             "a 4-byte DMA transfer must advance the PPU by (8 + 4*8)/4 = {} dots, not zero",
             expected_dots
@@ -3077,8 +3079,8 @@ mod tests {
 
         bus.write_u8(0x00420C, 0x01).unwrap(); // arm channel 0
 
-        tick_dots(&mut bus, 230 * 340);
-        tick_dots(&mut bus, 32 * 340); // vblank-exit: hdma_init arms + loads the first entry
+        tick_dots(&mut bus, 230 * 341);
+        tick_dots(&mut bus, 32 * 341); // vblank-exit: hdma_init arms + loads the first entry
         assert!(bus.dma_ref().hdma_pending(), "channel 0 is armed and its table isn't exhausted yet");
 
         tick_dots(&mut bus, 258); // scanline 0 hblank: transfers the 1 line, reload hits end-of-table
@@ -3111,8 +3113,8 @@ mod tests {
         bus.write_u8(0x004304, 0x7E).unwrap();
         bus.write_u8(0x00420C, 0x01).unwrap();
 
-        tick_dots(&mut bus, 230 * 340);
-        tick_dots(&mut bus, 32 * 340); // vblank-exit: hdma_init loads the 0x80 entry
+        tick_dots(&mut bus, 230 * 341);
+        tick_dots(&mut bus, 32 * 341); // vblank-exit: hdma_init loads the 0x80 entry
 
         tick_dots(&mut bus, 258); // scanline 0 hblank: transfers 0xAA, then must reload (not stall)
 
@@ -3145,8 +3147,8 @@ mod tests {
 
         bus.write_u8(0x00420C, 0x01).unwrap(); // arm channel 0
 
-        tick_dots(&mut bus, 230 * 340);
-        tick_dots(&mut bus, 32 * 340); // vblank-exit edge -> hdma_init loads the first entry
+        tick_dots(&mut bus, 230 * 341);
+        tick_dots(&mut bus, 32 * 341); // vblank-exit edge -> hdma_init loads the first entry
 
         let indirect_addr = bus.dma_ref().channel(0).unwrap().das;
         assert_eq!(indirect_addr, 0x1234, "high byte must wrap within bank $7E, not carry into $7F");
@@ -3219,9 +3221,9 @@ mod tests {
     #[test]
     fn slhv_latches_hv_counters_readable_at_213c_213d() {
         let mut bus = SystemBus::new();
-        // Advance the PPU to a known position: scanline 300 dots in ->
-        // h_counter = 300, scanline = 0; then 3 full lines + 17 dots.
-        tick_dots(&mut bus, 3 * 340 + 300);
+        // Advance the PPU to a known position: 3 full 341-dot lines plus
+        // 300 dots -> scanline = 3, h_counter = 300.
+        tick_dots(&mut bus, 3 * 341 + 300);
 
         let _ = bus.read_u8(0x002137).unwrap(); // SLHV: latch now
         tick_dots(&mut bus, 123); // moving on must NOT change the latch

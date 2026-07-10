@@ -3441,8 +3441,17 @@ impl Cpu {
     /// which `execute()` folds into its widened `u32` result immediately
     /// after this call returns.
     fn op_mvn(&mut self, bus: &mut impl MemoryBus) -> BusResult<u8> {
-        let src_bank = self.fetch_u8(bus)?;
+        // Operand order per the 65816 spec (Eyes & Lichty, "Block Move
+        // Instructions"): the byte after the opcode is the DESTINATION
+        // bank, the next one is the SOURCE bank -- the reverse of the
+        // assembler mnemonic's `MVN src,dst` operand order. These used to
+        // be read swapped, which made every cross-bank block move copy
+        // from the wrong bank into the wrong bank (e.g. SMW's overworld
+        // loader `MVN $7E,$0C` -- ROM tile data into WRAM -- instead read
+        // WRAM garbage and wrote it into read-only ROM, leaving the
+        // overworld's Map16 buffer holding the previous level's tiles).
         let dest_bank = self.fetch_u8(bus)?;
+        let src_bank = self.fetch_u8(bus)?;
         let initial_count = (self.a as u32).wrapping_add(1);
         let mut count = initial_count;
         while count > 0 {
@@ -3462,8 +3471,9 @@ impl Cpu {
     /// above the source. See `op_mvn` for the atomic-transfer rationale
     /// and cycle-accounting note.
     fn op_mvp(&mut self, bus: &mut impl MemoryBus) -> BusResult<u8> {
-        let src_bank = self.fetch_u8(bus)?;
+        // Destination bank first, then source bank -- see `op_mvn`.
         let dest_bank = self.fetch_u8(bus)?;
+        let src_bank = self.fetch_u8(bus)?;
         let initial_count = (self.a as u32).wrapping_add(1);
         let mut count = initial_count;
         while count > 0 {
@@ -5940,6 +5950,79 @@ mod tests {
 
         let cycles = cpu.step(&mut wram).unwrap();
         assert_eq!(cycles, 700);
+    }
+
+    #[test]
+    fn cpu_mvn_operand_bytes_are_destination_bank_then_source_bank() {
+        // Pins the machine-code operand ORDER with raw hand-written bytes
+        // (not an assembler helper): per the 65816 spec the byte after the
+        // MVN/MVP opcode is the DESTINATION bank and the following byte is
+        // the SOURCE bank -- the reverse of the `MVN src,dst` mnemonic.
+        // These were read swapped, which silently broke every cross-bank
+        // block move (same-bank moves, like the two tests above, could
+        // never catch it).
+        let mut cpu = Cpu::new();
+        let mut wram = Wram::new();
+        cpu.pb = 0x7E;
+        cpu.pc = 0x0000;
+        cpu.a = 3; // move 4 bytes
+        cpu.x = 0x2000; // source offset
+        cpu.y = 0x3000; // destination offset
+
+        // MVN with dest bank $7F, source bank $7E: raw bytes 54 7F 7E.
+        wram.write_u8(0x7E0000, 0x54).unwrap();
+        wram.write_u8(0x7E0001, 0x7F).unwrap(); // destination bank
+        wram.write_u8(0x7E0002, 0x7E).unwrap(); // source bank
+        for i in 0..4u32 {
+            wram.write_u8(0x7E2000 + i, 0xA0 + i as u8).unwrap(); // real source
+            wram.write_u8(0x7F2000 + i, 0x11).unwrap(); // decoy at swapped source
+        }
+
+        cpu.step(&mut wram).unwrap();
+
+        for i in 0..4u32 {
+            assert_eq!(
+                wram.read_u8(0x7F3000 + i).unwrap(),
+                0xA0 + i as u8,
+                "byte {} must be copied FROM $7E:2000+ TO $7F:3000+ -- a swapped read \
+                 would have copied the $11 decoys from $7F:2000+ instead",
+                i
+            );
+        }
+        assert_eq!(cpu.db, 0x7F, "DB must be left holding the destination bank");
+    }
+
+    #[test]
+    fn cpu_mvp_operand_bytes_are_destination_bank_then_source_bank() {
+        // Same order pin as the MVN test, for the decrementing variant.
+        let mut cpu = Cpu::new();
+        let mut wram = Wram::new();
+        cpu.pb = 0x7E;
+        cpu.pc = 0x0000;
+        cpu.a = 3; // move 4 bytes
+        cpu.x = 0x2003; // source END offset (MVP decrements)
+        cpu.y = 0x3003; // destination END offset
+
+        // MVP with dest bank $7F, source bank $7E: raw bytes 44 7F 7E.
+        wram.write_u8(0x7E0000, 0x44).unwrap();
+        wram.write_u8(0x7E0001, 0x7F).unwrap(); // destination bank
+        wram.write_u8(0x7E0002, 0x7E).unwrap(); // source bank
+        for i in 0..4u32 {
+            wram.write_u8(0x7E2000 + i, 0xB0 + i as u8).unwrap();
+            wram.write_u8(0x7F2000 + i, 0x22).unwrap(); // decoy
+        }
+
+        cpu.step(&mut wram).unwrap();
+
+        for i in 0..4u32 {
+            assert_eq!(
+                wram.read_u8(0x7F3000 + i).unwrap(),
+                0xB0 + i as u8,
+                "MVP byte {} must be copied FROM $7E TO $7F",
+                i
+            );
+        }
+        assert_eq!(cpu.db, 0x7F);
     }
 
     #[test]

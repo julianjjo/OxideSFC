@@ -36,6 +36,12 @@ pub const SCREEN_HEIGHT: usize = 224;
 const LAYER_BG1: u8 = 0;
 const LAYER_OBJ: u8 = 4;
 const LAYER_BACKDROP: u8 = 5;
+/// Sprite pixels using OBJ palettes 0-3. Real hardware NEVER applies color
+/// math to these -- CGADSUB bit 4 only enables math for sprites on palettes
+/// 4-7 (fullsnes "Color Math"). This id is 6, and the math gate masks
+/// CGADSUB to its 6 enable bits, so bit 6 (the half-color flag) can never
+/// accidentally enable math for it.
+const LAYER_OBJ_PAL03: u8 = 6;
 
 /// Renders one full frame to an RGBA8888 buffer (`SCREEN_WIDTH *
 /// SCREEN_HEIGHT * 4` bytes, row-major, opaque alpha) with a single
@@ -153,7 +159,10 @@ fn render_band(
         render_layers(&mut scratch.sub, &mut scratch.sub_layer, regs.ts, regs.tsw, vram, cgram, oam, regs, y0, y1);
     }
 
-    let math_enable = regs.cgadsub;
+    // Only the 6 per-layer enable bits participate in the layer gate --
+    // bits 6/7 are the half/subtract mode flags, and masking them keeps
+    // the LAYER_OBJ_PAL03 pseudo-layer (id 6) permanently math-exempt.
+    let math_enable = regs.cgadsub & 0x3F;
     let subtract = regs.cgadsub & 0x80 != 0;
     let half = regs.cgadsub & 0x40 != 0;
     let fixed = regs.coldata & 0x7FFF;
@@ -840,8 +849,15 @@ fn draw_sprites(
     // correct back-to-front slots for the current BG mode.
     for sprite_idx in (0..128u8).rev() {
         let base = (sprite_idx as usize) * 4;
-        let y_raw = oam.read(base as u16);
-        let x_low = oam.read(base as u16 + 1);
+        // OAM entry layout per fullsnes: byte 0 = X (low 8 bits), byte 1 =
+        // Y, byte 2 = tile, byte 3 = attributes. These first two used to
+        // be read SWAPPED (byte 0 as Y), which transposed every sprite
+        // around the screen diagonal -- subtle on near-diagonal scenes,
+        // but it scattered SMW's walking enemies into vertical stacks and
+        // painted a permanent garbage column at x=240 (sprites parked
+        // offscreen with Y=$F0 came back as X=240 with Y = their stale X).
+        let x_low = oam.read(base as u16);
+        let y_raw = oam.read(base as u16 + 1);
         let tile_low = oam.read(base as u16 + 2) as u16;
         let attrs = oam.read(base as u16 + 3);
 
@@ -936,7 +952,10 @@ fn draw_sprites(
                 let cgram_index = 128 + (palette_num * 16 + pixel_value as u16) as u8;
                 let idx = screen_y as usize * SCREEN_WIDTH + screen_x as usize;
                 buf[idx] = cgram.read_color(cgram_index) & 0x7FFF;
-                layer_buf[idx] = LAYER_OBJ;
+                // Hardware rule: color math only ever applies to sprites
+                // using OBJ palettes 4-7; palettes 0-3 are exempt even when
+                // CGADSUB bit 4 is set.
+                layer_buf[idx] = if palette_num < 4 { LAYER_OBJ_PAL03 } else { LAYER_OBJ };
             }
         }
     }
@@ -1103,9 +1122,12 @@ mod tests {
             vram.write(i as u16, b);
         }
 
-        // Sprite 0: Y=10, X=20, tile=0, palette=0, no flip, small size.
-        oam.write(0, 10); // Y
-        oam.write(1, 20); // X
+        // Sprite 0: X=20, Y=10, tile=0, palette=0, no flip, small size.
+        // Raw OAM byte order per fullsnes: byte 0 = X, byte 1 = Y (an
+        // earlier renderer read these swapped, and this test encoded the
+        // same swapped order, so it kept passing).
+        oam.write(0, 20); // X
+        oam.write(1, 10); // Y
         oam.write(2, 0); // tile
         oam.write(3, 0x00); // attrs: palette 0
         oam.write(512, 0x00); // high table byte for sprites 0-3: X high bit 0, size 0
@@ -1155,15 +1177,16 @@ mod tests {
         }
 
         // Sprite 0 at (20,10), tile 0, attrs = palette 1 (bits 1-3).
-        oam.write(0, 10);
-        oam.write(1, 20);
+        // (raw byte order: byte 0 = X, byte 1 = Y)
+        oam.write(0, 20);
+        oam.write(1, 10);
         oam.write(2, 0);
         oam.write(3, 0b0000_0010); // palette 1
         oam.write(512, 0x00);
         // Sprite 1 at (40,10), tile bit8 set via attr bit 0 -> tile 0x100
         // from the second table, palette 0, H-FLIP via bit 6.
-        oam.write(4, 10);
-        oam.write(5, 40);
+        oam.write(4, 40);
+        oam.write(5, 10);
         oam.write(6, 0);
         oam.write(7, 0b0100_0001); // hflip + tile bit 8
         // (sprite 1 shares high-table byte 512; both X high bits 0, small size)
@@ -1219,8 +1242,9 @@ mod tests {
         // silently disappears instead of showing the wrong graphics.
 
         // Sprite 0 at (20,10), base tile 0x0E, palette 0, no flip.
-        oam.write(0, 10); // Y
-        oam.write(1, 20); // X
+        // (raw byte order: byte 0 = X, byte 1 = Y)
+        oam.write(0, 20); // X
+        oam.write(1, 10); // Y
         oam.write(2, 0x0E); // tile low byte
         oam.write(3, 0x00); // attrs: palette 0, no flip, tile bit 8 = 0
         // Secondary OAM byte for sprites 0-3: sprite 0's size bit (bit 1)
@@ -1342,6 +1366,132 @@ mod tests {
         let raw = bgr555_to_rgb8(backdrop_color);
         assert_eq!((fb2[0], fb2[1], fb2[2]), raw,
             "with color math off, the backdrop must render unmodified");
+    }
+
+    #[test]
+    fn oam_entry_byte_order_is_x_then_y_per_real_hardware() {
+        // Pins the raw OAM byte order (fullsnes: byte 0 = X low 8 bits,
+        // byte 1 = Y). The renderer used to read these swapped, which
+        // transposed every sprite around the screen diagonal AND painted a
+        // permanent garbage column at x=240: sprites parked offscreen with
+        // Y=$F0 were drawn at X=240 with Y = whatever stale X they had.
+        // Deliberately uses X != Y and an asymmetric assertion so a swap
+        // cannot pass.
+        let mut vram = Vram::new();
+        for y in 0..8u16 {
+            vram.write(y * 2, 0xFF); // tile 0: all pixels value 1
+        }
+        let mut cgram = Cgram::new();
+        cgram.write(129 * 2, 0xFF);
+        cgram.write(129 * 2 + 1, 0x7F);
+        let mut oam = Oam::new();
+        for s in 0..128u16 {
+            oam.write(s * 4 + 1, 240); // park everything: Y byte = 240
+        }
+        // Sprite 0 raw bytes: [X=200, Y=50, tile=0, attr=0].
+        oam.write(0, 200);
+        oam.write(1, 50);
+        oam.write(2, 0);
+        oam.write(3, 0);
+        oam.write(512, 0);
+
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F;
+        regs.obsel = 0;
+        regs.tm = 0x10;
+
+        let fb = render_frame(&vram, &cgram, &oam, &regs);
+        let at = |x: usize, y: usize| (fb[(y * SCREEN_WIDTH + x) * 4], fb[(y * SCREEN_WIDTH + x) * 4 + 1]) != (0, 0);
+        assert!(
+            at(200, 50),
+            "raw OAM [200, 50] must place the sprite at X=200, Y=50"
+        );
+        assert!(
+            !at(50, 200),
+            "the transposed position must stay empty -- byte 0 is X, not Y"
+        );
+        // The parked sprites (Y byte = 240) must not paint anything at the
+        // right edge -- the old swap drew them all in a column at x=240.
+        for y in 0..SCREEN_HEIGHT {
+            for x in 240..SCREEN_WIDTH {
+                if y == 50 && x >= 200 {
+                    continue; // (not reachable: sprite spans 200-207)
+                }
+                assert!(
+                    !at(x, y),
+                    "parked sprite leaked to ({}, {}) -- Y=240 must keep it offscreen",
+                    x,
+                    y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn color_math_exempts_sprites_on_obj_palettes_0_to_3() {
+        // Hardware rule (fullsnes "Color Math"): CGADSUB bit 4 enables
+        // math only for sprite pixels using OBJ palettes 4-7; palettes 0-3
+        // are NEVER blended. Character sprites (Mario, enemies) live on
+        // the low palettes precisely so a game can make pal-4-7 effect
+        // sprites (bubbles, spotlights) translucent without washing out
+        // the actors -- blending everything made characters look wrong
+        // anywhere OBJ math was on (e.g. SMW's overworld, CGADSUB=$30).
+        let mut vram = Vram::new();
+        let mut cgram = Cgram::new();
+        let mut oam = Oam::new();
+
+        // One tile, all 64 pixels = value 1.
+        let tile = make_2bpp_tile([[1; 8]; 8]);
+        for (i, &b) in tile.iter().enumerate() {
+            vram.write(i as u16, b);
+        }
+
+        // Sprite 0: palette 0 (math-exempt). Sprite 1: palette 4 (blended).
+        // Both 8x8, at y=10, x=20 and x=40. (byte 0 = X, byte 1 = Y)
+        oam.write(0, 20);
+        oam.write(1, 10);
+        oam.write(2, 0);
+        oam.write(3, 0x00); // palette 0
+        oam.write(4, 40);
+        oam.write(5, 10);
+        oam.write(6, 0);
+        oam.write(7, 0x08); // attrs bit3-1 = 100 -> palette 4
+        oam.write(512, 0x00);
+
+        // Both palettes' color 1 = the same mid red (r=16).
+        let sprite_color: u16 = 16;
+        for pal in [0usize, 4] {
+            let e = 128 + pal * 16 + 1;
+            cgram.write((e * 2) as u16, (sprite_color & 0xFF) as u8);
+            cgram.write((e * 2 + 1) as u16, (sprite_color >> 8) as u8);
+        }
+
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F;
+        regs.obsel = 0x00;
+        regs.tm = 0x10; // sprites only on main
+        // Math: enable on OBJ (bit4), add, full. Operand = fixed color,
+        // pure green (g=20) so the blended pixel visibly changes.
+        regs.cgadsub = 0x10;
+        regs.cgwsel = 0x00;
+        regs.coldata = 20 << 5;
+
+        let fb = render_frame(&vram, &cgram, &oam, &regs);
+
+        let raw = bgr555_to_rgb8(sprite_color);
+        let blended = bgr555_to_rgb8(sprite_color | (20 << 5));
+        let pal0_idx = (10 * SCREEN_WIDTH + 20) * 4;
+        let pal4_idx = (10 * SCREEN_WIDTH + 40) * 4;
+        assert_eq!(
+            (fb[pal0_idx], fb[pal0_idx + 1], fb[pal0_idx + 2]),
+            raw,
+            "a palette-0 sprite pixel must NOT be color-mathed even with CGADSUB bit 4 set"
+        );
+        assert_eq!(
+            (fb[pal4_idx], fb[pal4_idx + 1], fb[pal4_idx + 2]),
+            blended,
+            "a palette-4 sprite pixel MUST be color-mathed when CGADSUB bit 4 is set"
+        );
     }
 
     /// Writes mode-7 tile data: assigns `tile` to every map entry of the
