@@ -65,9 +65,20 @@ pub struct SystemBus {
     cgadd: u8,
     /// Toggles low/high byte on each $2122 write; reset by writing $2121.
     cgram_high: bool,
-    /// $2102/$2103 OAMADD: current OAM byte-pair (word) address.
+    /// Current (live) OAM byte-pair (word) address -- advances as $2104
+    /// writes / $2138 reads consume bytes.
     oamadd: u16,
-    /// Toggles low/high byte on each $2104 write; reset by writing $2102/$2103.
+    /// The reload value software last wrote via $2102/$2103. Real hardware
+    /// reloads the live OAM address from this latch at the START of every
+    /// vblank (unless in forced blank) -- games like DKC set OAMADD once
+    /// and rely entirely on that per-frame auto-reset before their vblank
+    /// OAM DMA. Without modeling it, the live address marched off the end
+    /// of OAM by +0x110 words every frame and every subsequent sprite
+    /// upload landed wrapped at garbage offsets (DKC gameplay rendered
+    /// with no sprites at all: DK, enemies, bananas all invisible).
+    oamadd_latch: u16,
+    /// Toggles low/high byte on each $2104 write; reset by writing
+    /// $2102/$2103 and by the vblank reload.
     oam_high: bool,
     /// Background/sprite rendering register state ($2100, $2101, $2105,
     /// $2107-$2114, $212C) -- see `render_frame`.
@@ -243,6 +254,7 @@ impl SystemBus {
             cgadd: 0,
             cgram_high: false,
             oamadd: 0,
+            oamadd_latch: 0,
             oam_high: false,
             ppu_regs: PpuRegisters::default(),
             joypad1_state: 0,
@@ -514,6 +526,17 @@ impl SystemBus {
             if self.auto_joypad_read_enable {
                 self.joy1_auto = self.joypad1_state;
                 self.joy2_auto = self.joypad2_state;
+            }
+            // Real hardware reloads the live OAM address from the
+            // $2102/$2103 latch at the start of every vblank (unless the
+            // screen is in forced blank). Games rely on this instead of
+            // rewriting OAMADD each frame -- DKC sets it once and DMAs 544
+            // bytes to $2104 every vblank; without the reload the live
+            // address kept marching past the end of OAM and no sprite
+            // upload ever landed again.
+            if self.ppu_regs.inidisp & 0x80 == 0 {
+                self.oamadd = self.oamadd_latch;
+                self.oam_high = false;
             }
         }
         if !in_vblank && self.was_in_vblank {
@@ -969,6 +992,7 @@ impl SystemBus {
         put_u8(out, self.cgadd);
         put_bool(out, self.cgram_high);
         put_u16(out, self.oamadd);
+        put_u16(out, self.oamadd_latch);
         put_bool(out, self.oam_high);
         put_u16(out, self.joypad1_state);
         put_bool(out, self.auto_joypad_read_enable);
@@ -1032,6 +1056,7 @@ impl SystemBus {
         self.cgadd = r.u8()?;
         self.cgram_high = r.bool()?;
         self.oamadd = r.u16()?;
+        self.oamadd_latch = r.u16()?;
         self.oam_high = r.bool()?;
         self.joypad1_state = r.u16()?;
         self.auto_joypad_read_enable = r.bool()?;
@@ -1698,14 +1723,19 @@ impl SystemBus {
                 return Ok(());
             }
 
-            // $2102/$2103: OAMADDL/OAMADDH -- also resets the low/high byte toggle.
+            // $2102/$2103: OAMADDL/OAMADDH -- sets both the reload latch
+            // (re-applied to the live address at each vblank start, see
+            // `tick_ppu_dots`) and the live address itself, and resets the
+            // low/high byte toggle.
             if offset == 0x2102 {
-                self.oamadd = (self.oamadd & 0xFF00) | (value as u16);
+                self.oamadd_latch = (self.oamadd_latch & 0xFF00) | (value as u16);
+                self.oamadd = self.oamadd_latch;
                 self.oam_high = false;
                 return Ok(());
             }
             if offset == 0x2103 {
-                self.oamadd = (self.oamadd & 0x00FF) | (((value & 0x01) as u16) << 8);
+                self.oamadd_latch = (self.oamadd_latch & 0x00FF) | (((value & 0x01) as u16) << 8);
+                self.oamadd = self.oamadd_latch;
                 self.oam_high = false;
                 return Ok(());
             }
@@ -2507,6 +2537,62 @@ mod tests {
         // 4 master cycles per dot -- dot-granular, so odd counts (a real
         // scanline is 341 dots) advance exactly.
         bus.tick_master(dots * 4);
+    }
+
+    #[test]
+    fn oam_address_reloads_from_the_2102_latch_at_every_vblank_start() {
+        // Real hardware re-applies the last $2102/$2103 value to the live
+        // OAM address at the start of each vblank (unless forced blank).
+        // DKC sets OAMADD=0 once and then relies on this auto-reload for
+        // its every-frame 544-byte OAM DMA; without it, the live address
+        // marched +0x110 words per frame past the end of OAM and no
+        // sprite upload ever landed again -- gameplay rendered with no
+        // sprites at all (no player, no enemies).
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x0F).unwrap(); // screen on (reload is gated on !forced-blank)
+        bus.write_u8(0x002102, 0x00).unwrap();
+        bus.write_u8(0x002103, 0x00).unwrap();
+
+        // Consume a word and a half, leaving the live address mid-word 1.
+        bus.write_u8(0x002104, 0x11).unwrap();
+        bus.write_u8(0x002104, 0x22).unwrap();
+        bus.write_u8(0x002104, 0x33).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0x11);
+        assert_eq!(bus.ppu_ref().oam_ref().read(2), 0x33);
+
+        // Cross one vblank-entry edge WITHOUT touching $2102/$2103.
+        tick_dots(&mut bus, 230 * 341);
+
+        // The next writes must land back at word 0 (and with the byte
+        // toggle reset), exactly as if software had rewritten OAMADD.
+        bus.write_u8(0x002104, 0xAA).unwrap();
+        bus.write_u8(0x002104, 0xBB).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0xAA, "low byte of word 0 -- the vblank reload must reset the live address to the $2102/$2103 latch");
+        assert_eq!(bus.ppu_ref().oam_ref().read(1), 0xBB, "high byte of word 0");
+        assert_eq!(bus.ppu_ref().oam_ref().read(2), 0x33, "word 1 must be untouched by the post-reload writes");
+    }
+
+    #[test]
+    fn oam_address_does_not_reload_during_forced_blank() {
+        // The vblank auto-reload is suppressed while INIDISP bit 7 (forced
+        // blank) is set -- writes keep streaming from wherever the live
+        // address is, which is exactly what boot-time OAM-clear loops that
+        // span several (blanked) frames rely on.
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x8F).unwrap(); // forced blank ON
+        bus.write_u8(0x002102, 0x00).unwrap();
+        bus.write_u8(0x002103, 0x00).unwrap();
+
+        bus.write_u8(0x002104, 0x11).unwrap();
+        bus.write_u8(0x002104, 0x22).unwrap();
+
+        tick_dots(&mut bus, 230 * 341); // vblank entry while blanked: no reload
+
+        bus.write_u8(0x002104, 0x33).unwrap();
+        bus.write_u8(0x002104, 0x44).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0x11, "word 0 must NOT be overwritten -- no reload happened");
+        assert_eq!(bus.ppu_ref().oam_ref().read(2), 0x33, "the stream must continue at word 1");
+        assert_eq!(bus.ppu_ref().oam_ref().read(3), 0x44);
     }
 
     #[test]
