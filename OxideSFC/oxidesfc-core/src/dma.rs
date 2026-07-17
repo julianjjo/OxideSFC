@@ -51,17 +51,25 @@ pub struct DmaChannel {
     /// backing field, so writing $43xC clobbered what $43xB last read
     /// back).
     unused_c: u8,
-    /// NLTRx ($43xA): the raw line-counter/repeat byte last read from the HDMA
-    /// table. Bit 7 = "no repeat" (fetch fresh data from the table every
-    /// line); bit 7 clear = "repeat" (reuse the data fetched when this
-    /// entry was loaded for every line in it). Bits 0-6 = lines remaining
-    /// in the current table entry; a freshly-read value of 0 means the
-    /// table has ended and this channel does nothing for the rest of the
-    /// frame.
+    /// NLTRx ($43xA): the raw line-counter/repeat byte last read from the
+    /// HDMA table, decremented as a WHOLE byte once per scanline (so the
+    /// repeat bit is naturally consumed along with the count, matching
+    /// real hardware -- e.g. a raw 0x80 behaves as "transfer once, then
+    /// wait 127 lines"). Bit 7 set = "repeat" (transfer on every line of
+    /// the entry); bit 7 clear = transfer only on the entry's FIRST line,
+    /// with no B-bus writes at all on the remaining wait lines. A
+    /// freshly-read value of 0 is the end-of-table marker.
     pub(crate) hdma_line_counter: u8,
     /// True once this channel's table has been read to its end-of-table
     /// (0x00) marker; the channel is inert for the rest of the frame.
     pub(crate) hdma_terminated: bool,
+    /// Whether this channel performs a B-bus transfer on the current
+    /// scanline: set when a table entry is (re)loaded (every entry's first
+    /// line always transfers), then re-derived each line from the repeat
+    /// bit -- the canonical hardware HDMA state machine (anomie/fullsnes).
+    /// Without it, wait lines of non-repeat entries kept re-writing the
+    /// B-bus every scanline.
+    pub(crate) hdma_do_transfer: bool,
     /// $43xD: unused/unmapped on real hardware -- independent storage, not
     /// aliased onto A1TxL (previously writing this offset silently
     /// corrupted the channel's real A-bus source address).
@@ -94,6 +102,7 @@ impl DmaChannel {
             unused_c: 0,
             hdma_line_counter: 0,
             hdma_terminated: false,
+            hdma_do_transfer: false,
             unused_d: 0,
             unused_e: 0,
             unused_f: 0,
@@ -290,6 +299,7 @@ impl Dma {
             put_u8(out, ch.unused_c);
             put_u8(out, ch.hdma_line_counter);
             put_bool(out, ch.hdma_terminated);
+            put_bool(out, ch.hdma_do_transfer);
             put_u8(out, ch.unused_d);
             put_u8(out, ch.unused_e);
             put_u8(out, ch.unused_f);
@@ -314,6 +324,7 @@ impl Dma {
             ch.unused_c = r.u8()?;
             ch.hdma_line_counter = r.u8()?;
             ch.hdma_terminated = r.bool()?;
+            ch.hdma_do_transfer = r.bool()?;
             ch.unused_d = r.u8()?;
             ch.unused_e = r.u8()?;
             ch.unused_f = r.u8()?;

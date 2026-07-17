@@ -65,9 +65,20 @@ pub struct SystemBus {
     cgadd: u8,
     /// Toggles low/high byte on each $2122 write; reset by writing $2121.
     cgram_high: bool,
-    /// $2102/$2103 OAMADD: current OAM byte-pair (word) address.
+    /// Current (live) OAM byte-pair (word) address -- advances as $2104
+    /// writes / $2138 reads consume bytes.
     oamadd: u16,
-    /// Toggles low/high byte on each $2104 write; reset by writing $2102/$2103.
+    /// The reload value software last wrote via $2102/$2103. Real hardware
+    /// reloads the live OAM address from this latch at the START of every
+    /// vblank (unless in forced blank) -- games like DKC set OAMADD once
+    /// and rely entirely on that per-frame auto-reset before their vblank
+    /// OAM DMA. Without modeling it, the live address marched off the end
+    /// of OAM by +0x110 words every frame and every subsequent sprite
+    /// upload landed wrapped at garbage offsets (DKC gameplay rendered
+    /// with no sprites at all: DK, enemies, bananas all invisible).
+    oamadd_latch: u16,
+    /// Toggles low/high byte on each $2104 write; reset by writing
+    /// $2102/$2103 and by the vblank reload.
     oam_high: bool,
     /// Background/sprite rendering register state ($2100, $2101, $2105,
     /// $2107-$2114, $212C) -- see `render_frame`.
@@ -243,6 +254,7 @@ impl SystemBus {
             cgadd: 0,
             cgram_high: false,
             oamadd: 0,
+            oamadd_latch: 0,
             oam_high: false,
             ppu_regs: PpuRegisters::default(),
             joypad1_state: 0,
@@ -393,6 +405,14 @@ impl SystemBus {
         )
     }
 
+    /// Read-only view of the per-scanline register snapshots that
+    /// `render_frame` renders from -- lets tests/diagnostics inspect
+    /// exactly what state each visible line was rendered with (IRQ raster
+    /// splits, HDMA scroll/color effects).
+    pub fn scanline_regs_ref(&self) -> &[PpuRegisters] {
+        &self.scanline_regs
+    }
+
 
 
     /// Read-only access to the current background/sprite rendering
@@ -506,6 +526,17 @@ impl SystemBus {
             if self.auto_joypad_read_enable {
                 self.joy1_auto = self.joypad1_state;
                 self.joy2_auto = self.joypad2_state;
+            }
+            // Real hardware reloads the live OAM address from the
+            // $2102/$2103 latch at the start of every vblank (unless the
+            // screen is in forced blank). Games rely on this instead of
+            // rewriting OAMADD each frame -- DKC sets it once and DMAs 544
+            // bytes to $2104 every vblank; without the reload the live
+            // address kept marching past the end of OAM and no sprite
+            // upload ever landed again.
+            if self.ppu_regs.inidisp & 0x80 == 0 {
+                self.oamadd = self.oamadd_latch;
+                self.oam_high = false;
             }
         }
         if !in_vblank && self.was_in_vblank {
@@ -817,14 +848,30 @@ impl SystemBus {
             if indirect && line_counter != 0 {
                 ch.das = indirect_addr;
             }
+            // Every freshly-loaded entry transfers on its first line,
+            // repeat bit or not (canonical hardware HDMA state machine).
+            ch.hdma_do_transfer = line_counter != 0;
         }
     }
 
-    /// Runs one scanline's worth of HDMA transfers for every channel armed
-    /// in `hdma_enable_mask` and not yet terminated, called once per
-    /// scanline at the hblank-entry edge (from `tick_ppu`) for every
-    /// non-vblank scanline. Advances each channel's line counter, loading
-    /// the next table entry when the current one's countdown reaches zero.
+    /// Runs one scanline's worth of HDMA for every channel armed in
+    /// `hdma_enable_mask` and not yet terminated, called once per scanline
+    /// at the hblank-entry edge (from `tick_ppu`) for every non-vblank
+    /// scanline. This is the canonical hardware state machine
+    /// (anomie/fullsnes): transfer only when `hdma_do_transfer` is set
+    /// (every entry's first line, and every line of repeat entries),
+    /// decrement the WHOLE raw line-counter byte, re-derive
+    /// `hdma_do_transfer` from the repeat bit, and reload when the 7-bit
+    /// count hits zero.
+    ///
+    /// The previous version transferred on every line of every entry and
+    /// never advanced a direct-mode channel's table pointer past its
+    /// inline data, so the moment a non-repeat entry expired, the "next
+    /// line-count byte" it read was actually the previous entry's DATA
+    /// byte -- the whole table walk slid out of sync. DKC's intro drives
+    /// BGMODE/CGADSUB/TS through exactly such tables (`7F 03 18 03 03 03
+    /// 00`), and the desync sprayed the count byte 0x18 into all three
+    /// registers for a few scanlines mid-screen (visible garbage bands).
     fn hdma_run_scanline(&mut self) {
         // Per-line transfers are engine traffic, billed at the hardware
         // rate inside `hdma_transfer_one_line`, not as CPU accesses.
@@ -833,35 +880,31 @@ impl SystemBus {
             if self.hdma_enable_mask & (1 << i) == 0 {
                 continue;
             }
-            let terminated = match self.dma.channel(i) {
-                Some(ch) => ch.hdma_terminated,
+            let (terminated, do_transfer) = match self.dma.channel(i) {
+                Some(ch) => (ch.hdma_terminated, ch.hdma_do_transfer),
                 None => continue,
             };
             if terminated {
                 continue;
             }
 
-            self.hdma_transfer_one_line(i);
+            if do_transfer {
+                self.hdma_transfer_one_line(i);
+            }
 
-            let lines_left = self.dma.channel(i).map(|ch| ch.hdma_line_counter & 0x7F).unwrap_or(0);
-            if lines_left == 0 {
-                // Degenerate raw NLTRx byte 0x80 (repeat bit set, but the
-                // 7-bit line count is 0): not caught by
-                // `hdma_load_next_entry`'s end-of-table check (which only
-                // treats the raw byte 0x00 as "terminated"), and
-                // `lines_left.wrapping_sub(1)` would wrap 0 -> 0xFF,
-                // stalling on this entry for 127 phantom scanlines. Real
-                // hardware treats "0 lines encoded" as "reload
-                // immediately", regardless of the repeat bit.
+            let mut reload = false;
+            if let Some(ch) = self.dma.channel_mut(i) {
+                // Whole-byte decrement: the repeat bit is consumed along
+                // with the count, so a raw 0x80 naturally behaves as
+                // "transfer once, then wait 127 lines" like real hardware.
+                ch.hdma_line_counter = ch.hdma_line_counter.wrapping_sub(1);
+                ch.hdma_do_transfer = ch.hdma_line_counter & 0x80 != 0;
+                reload = ch.hdma_line_counter & 0x7F == 0;
+            }
+            if reload {
+                // Sets `hdma_do_transfer` for the fresh entry's first line
+                // (or terminates on the 0x00 end-of-table marker).
                 self.hdma_load_next_entry(i);
-            } else {
-                let new_lines_left = lines_left.wrapping_sub(1);
-                if new_lines_left == 0 {
-                    self.hdma_load_next_entry(i);
-                } else if let Some(ch) = self.dma.channel_mut(i) {
-                    let repeat_bit = ch.hdma_line_counter & 0x80;
-                    ch.hdma_line_counter = repeat_bit | new_lines_left;
-                }
             }
         }
         self.accounting_suspended -= 1;
@@ -871,13 +914,16 @@ impl SystemBus {
     /// Performs the actual B-bus write(s) for one channel's current
     /// scanline, reading source bytes from the table's current position
     /// (direct mode) or the latched indirect address (indirect mode).
-    /// Whether the source pointer advances afterward depends on the
-    /// entry's repeat flag (NLTRx bit 7, `hdma_line_counter`'s doc
-    /// comment): "fetch every line" entries advance so the next scanline
-    /// reads fresh bytes, "repeat" entries leave the pointer alone so the
-    /// next scanline re-reads the same bytes.
+    /// The source pointer ALWAYS advances past the bytes just read --
+    /// direct-mode data lives inline in the table, so the table pointer
+    /// must move past it or the next line-count read lands on data bytes
+    /// (an earlier version only advanced when the repeat bit was set,
+    /// which desynced every direct-mode table walk -- see
+    /// `hdma_run_scanline`). Repeat entries re-transfer fresh bytes each
+    /// line on real hardware too; "reuse the same bytes" was never how the
+    /// hardware works.
     fn hdma_transfer_one_line(&mut self, channel: usize) {
-        let (mode, bbad, indirect, fetch_every_line, src_bank, mut src_offset) = match self.dma.channel(channel) {
+        let (mode, bbad, indirect, src_bank, mut src_offset) = match self.dma.channel(channel) {
             Some(ch) => {
                 let indirect = ch.hdma_indirect_mode();
                 let (bank, offset) = if indirect {
@@ -885,7 +931,7 @@ impl SystemBus {
                 } else {
                     (ch.a1b, ch.a2a)
                 };
-                (ch.transfer_mode(), ch.bbad, indirect, (ch.hdma_line_counter & 0x80) != 0, bank, offset)
+                (ch.transfer_mode(), ch.bbad, indirect, bank, offset)
             }
             None => return,
         };
@@ -904,14 +950,11 @@ impl SystemBus {
             src_offset = src_offset.wrapping_add(1);
         }
 
-        if fetch_every_line {
-            let n = pattern.len() as u16;
-            if let Some(ch) = self.dma.channel_mut(channel) {
-                if indirect {
-                    ch.das = ch.das.wrapping_add(n);
-                } else {
-                    ch.a2a = ch.a2a.wrapping_add(n);
-                }
+        if let Some(ch) = self.dma.channel_mut(channel) {
+            if indirect {
+                ch.das = src_offset;
+            } else {
+                ch.a2a = src_offset;
             }
         }
 
@@ -949,6 +992,7 @@ impl SystemBus {
         put_u8(out, self.cgadd);
         put_bool(out, self.cgram_high);
         put_u16(out, self.oamadd);
+        put_u16(out, self.oamadd_latch);
         put_bool(out, self.oam_high);
         put_u16(out, self.joypad1_state);
         put_bool(out, self.auto_joypad_read_enable);
@@ -1012,6 +1056,7 @@ impl SystemBus {
         self.cgadd = r.u8()?;
         self.cgram_high = r.bool()?;
         self.oamadd = r.u16()?;
+        self.oamadd_latch = r.u16()?;
         self.oam_high = r.bool()?;
         self.joypad1_state = r.u16()?;
         self.auto_joypad_read_enable = r.bool()?;
@@ -1678,14 +1723,19 @@ impl SystemBus {
                 return Ok(());
             }
 
-            // $2102/$2103: OAMADDL/OAMADDH -- also resets the low/high byte toggle.
+            // $2102/$2103: OAMADDL/OAMADDH -- sets both the reload latch
+            // (re-applied to the live address at each vblank start, see
+            // `tick_ppu_dots`) and the live address itself, and resets the
+            // low/high byte toggle.
             if offset == 0x2102 {
-                self.oamadd = (self.oamadd & 0xFF00) | (value as u16);
+                self.oamadd_latch = (self.oamadd_latch & 0xFF00) | (value as u16);
+                self.oamadd = self.oamadd_latch;
                 self.oam_high = false;
                 return Ok(());
             }
             if offset == 0x2103 {
-                self.oamadd = (self.oamadd & 0x00FF) | (((value & 0x01) as u16) << 8);
+                self.oamadd_latch = (self.oamadd_latch & 0x00FF) | (((value & 0x01) as u16) << 8);
+                self.oamadd = self.oamadd_latch;
                 self.oam_high = false;
                 return Ok(());
             }
@@ -2490,14 +2540,80 @@ mod tests {
     }
 
     #[test]
-    fn hdma_direct_mode_repeat_entry_writes_same_byte_across_its_lines_then_terminates() {
+    fn oam_address_reloads_from_the_2102_latch_at_every_vblank_start() {
+        // Real hardware re-applies the last $2102/$2103 value to the live
+        // OAM address at the start of each vblank (unless forced blank).
+        // DKC sets OAMADD=0 once and then relies on this auto-reload for
+        // its every-frame 544-byte OAM DMA; without it, the live address
+        // marched +0x110 words per frame past the end of OAM and no
+        // sprite upload ever landed again -- gameplay rendered with no
+        // sprites at all (no player, no enemies).
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x0F).unwrap(); // screen on (reload is gated on !forced-blank)
+        bus.write_u8(0x002102, 0x00).unwrap();
+        bus.write_u8(0x002103, 0x00).unwrap();
+
+        // Consume a word and a half, leaving the live address mid-word 1.
+        bus.write_u8(0x002104, 0x11).unwrap();
+        bus.write_u8(0x002104, 0x22).unwrap();
+        bus.write_u8(0x002104, 0x33).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0x11);
+        assert_eq!(bus.ppu_ref().oam_ref().read(2), 0x33);
+
+        // Cross one vblank-entry edge WITHOUT touching $2102/$2103.
+        tick_dots(&mut bus, 230 * 341);
+
+        // The next writes must land back at word 0 (and with the byte
+        // toggle reset), exactly as if software had rewritten OAMADD.
+        bus.write_u8(0x002104, 0xAA).unwrap();
+        bus.write_u8(0x002104, 0xBB).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0xAA, "low byte of word 0 -- the vblank reload must reset the live address to the $2102/$2103 latch");
+        assert_eq!(bus.ppu_ref().oam_ref().read(1), 0xBB, "high byte of word 0");
+        assert_eq!(bus.ppu_ref().oam_ref().read(2), 0x33, "word 1 must be untouched by the post-reload writes");
+    }
+
+    #[test]
+    fn oam_address_does_not_reload_during_forced_blank() {
+        // The vblank auto-reload is suppressed while INIDISP bit 7 (forced
+        // blank) is set -- writes keep streaming from wherever the live
+        // address is, which is exactly what boot-time OAM-clear loops that
+        // span several (blanked) frames rely on.
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x8F).unwrap(); // forced blank ON
+        bus.write_u8(0x002102, 0x00).unwrap();
+        bus.write_u8(0x002103, 0x00).unwrap();
+
+        bus.write_u8(0x002104, 0x11).unwrap();
+        bus.write_u8(0x002104, 0x22).unwrap();
+
+        tick_dots(&mut bus, 230 * 341); // vblank entry while blanked: no reload
+
+        bus.write_u8(0x002104, 0x33).unwrap();
+        bus.write_u8(0x002104, 0x44).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0x11, "word 0 must NOT be overwritten -- no reload happened");
+        assert_eq!(bus.ppu_ref().oam_ref().read(2), 0x33, "the stream must continue at word 1");
+        assert_eq!(bus.ppu_ref().oam_ref().read(3), 0x44);
+    }
+
+    #[test]
+    fn hdma_direct_mode_non_repeat_entry_writes_once_then_waits_without_touching_the_bbus() {
+        // Regression guard for the DKC intro table-desync bug: a
+        // non-repeat entry (bit7 CLEAR, count $01-$80) transfers on its
+        // FIRST line only -- the remaining "wait" lines perform no B-bus
+        // writes at all -- and the table pointer must end up past the
+        // entry's inline data so the next line-count read lands on the
+        // real next entry, not on data bytes. The old engine transferred
+        // on every line and never advanced the pointer, so tables like
+        // DKC's `7F 03 18 03 03 03 00` slid out of sync the moment the
+        // first entry expired (count bytes written to the PPU as data,
+        // data bytes consumed as counts).
         let mut bus = SystemBus::new();
 
-        // HDMA table in WRAM at $7E:2000: one "repeat" entry (bit7 clear)
-        // covering 2 lines with a single data byte 0xAA, then the 0x00
-        // end-of-table marker.
-        bus.write_u8(0x7E2000, 0x02).unwrap(); // line-count=2, repeat
-        bus.write_u8(0x7E2001, 0xAA).unwrap(); // the repeated data byte
+        // HDMA table in WRAM at $7E:2000: one non-repeat entry (bit7
+        // clear) covering 2 lines with a single data byte 0xAA, then the
+        // 0x00 end-of-table marker.
+        bus.write_u8(0x7E2000, 0x02).unwrap(); // line-count=2, non-repeat
+        bus.write_u8(0x7E2001, 0xAA).unwrap(); // the entry's single data byte
         bus.write_u8(0x7E2002, 0x00).unwrap(); // end of table
 
         // VRAM address 0, increment by 1 word after each low-byte write
@@ -2521,28 +2637,38 @@ mod tests {
 
         tick_dots(&mut bus, 230 * 341); // into vblank (scanline 230)
         tick_dots(&mut bus, 32 * 341); // exit vblank -> scanline 0, dot 0: hdma_init() fires
-        tick_dots(&mut bus, 258); // scanline 0 hblank-entry: 1st transfer (line-count 2->1)
+        tick_dots(&mut bus, 258); // scanline 0 hblank-entry: the entry's one transfer
 
-        assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0xAA, "line 1 of the repeat entry must write the table's data byte");
+        assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0xAA, "the entry's first line must write the table's data byte");
 
         tick_dots(&mut bus, 341 - 258); // scanline 1, dot 0 (clears the hblank edge flag)
-        tick_dots(&mut bus, 258); // scanline 1 hblank-entry: 2nd transfer (line-count 1->0, reloads next entry -> reads 0x00 -> terminates)
+        tick_dots(&mut bus, 258); // scanline 1 hblank-entry: WAIT line (count 2->0 exhausts, reload reads 0x00 -> terminates)
 
-        assert_eq!(bus.ppu_ref().vram_ref().read(0x0002), 0xAA, "line 2 of the repeat entry must reuse the same data byte, at the auto-incremented VRAM address");
+        assert_eq!(
+            bus.ppu_ref().vram_ref().read(0x0002),
+            0x00,
+            "a non-repeat entry's wait lines must not write the B-bus at all (the old engine re-wrote every line)"
+        );
 
         tick_dots(&mut bus, 341 - 258); // scanline 2, dot 0
         tick_dots(&mut bus, 258); // scanline 2 hblank-entry: channel is terminated, must not transfer again
 
-        assert_eq!(bus.ppu_ref().vram_ref().read(0x0004), 0x00, "a terminated channel must not keep transferring into subsequent scanlines");
+        assert_eq!(bus.ppu_ref().vram_ref().read(0x0002), 0x00, "a terminated channel must not keep transferring into subsequent scanlines");
+        assert!(
+            bus.dma_ref().channel(0).unwrap().hdma_terminated,
+            "after the wait line, the reload must read the end-of-table marker (0x00) -- not the entry's own data byte -- and terminate"
+        );
     }
 
     #[test]
-    fn hdma_direct_mode_no_repeat_entry_fetches_fresh_data_each_line() {
+    fn hdma_direct_mode_repeat_entry_streams_fresh_data_each_line() {
         let mut bus = SystemBus::new();
 
-        // "No repeat" entry (bit7 set): line-count=2 with 2 lines' worth
-        // of distinct data (0x11, 0x22) following, then end-of-table.
-        bus.write_u8(0x7E3000, 0x82).unwrap(); // 0x80 | 2 = no-repeat, 2 lines
+        // Repeat entry (bit7 SET, $81-$FF): transfers on EVERY line of the
+        // entry, consuming fresh data bytes from the table each line --
+        // line-count=2 with 2 lines' worth of distinct data (0x11, 0x22)
+        // following, then end-of-table.
+        bus.write_u8(0x7E3000, 0x82).unwrap(); // 0x80 | 2 = repeat, 2 lines
         bus.write_u8(0x7E3001, 0x11).unwrap();
         bus.write_u8(0x7E3002, 0x22).unwrap();
         bus.write_u8(0x7E3003, 0x00).unwrap();
@@ -3088,17 +3214,18 @@ mod tests {
     }
 
     #[test]
-    fn hdma_zero_lines_encoded_reloads_immediately_instead_of_stalling_127_lines() {
-        // Degenerate raw NLTRx byte 0x80: repeat bit set, but the 7-bit
-        // line count is 0. Not caught by `hdma_load_next_entry`'s
-        // end-of-table check (which only treats raw byte 0x00 as
-        // "terminated"), and a buggy `lines_left.wrapping_sub(1)` would
-        // wrap 0 -> 0xFF, stalling on this entry re-reading stale data for
-        // 127 phantom scanlines before ever reaching the real next entry.
+    fn hdma_raw_0x80_line_counter_is_a_128_line_non_repeat_entry() {
+        // Raw NLTRx byte 0x80 (repeat bit set, 7-bit count 0): because
+        // real hardware decrements the WHOLE raw byte each scanline, 0x80
+        // behaves as a plain 128-line non-repeat entry -- one transfer on
+        // the first line (0x80 -> 0x7F clears the repeat bit), then 127
+        // wait lines before the next entry loads. An earlier version
+        // special-cased this to "reload the next entry immediately", which
+        // is not what the hardware does.
         let mut bus = SystemBus::new();
 
-        bus.write_u8(0x7E5000, 0x80).unwrap(); // 0 lines, repeat bit set
-        bus.write_u8(0x7E5001, 0xAA).unwrap(); // this scanline's data byte
+        bus.write_u8(0x7E5000, 0x80).unwrap(); // raw 0x80: 128 lines, transfer once
+        bus.write_u8(0x7E5001, 0xAA).unwrap(); // that first line's data byte
         bus.write_u8(0x7E5002, 0x01).unwrap(); // next real entry: 1 line
         bus.write_u8(0x7E5003, 0xBB).unwrap();
         bus.write_u8(0x7E5004, 0x00).unwrap(); // end of table
@@ -3116,13 +3243,33 @@ mod tests {
         tick_dots(&mut bus, 230 * 341);
         tick_dots(&mut bus, 32 * 341); // vblank-exit: hdma_init loads the 0x80 entry
 
-        tick_dots(&mut bus, 258); // scanline 0 hblank: transfers 0xAA, then must reload (not stall)
+        tick_dots(&mut bus, 258); // scanline 0 hblank: the entry's single transfer
 
-        let line_counter = bus.dma_ref().channel(0).unwrap().hdma_line_counter;
+        assert_eq!(bus.ppu_ref().vram_ref().read(0x0000), 0xAA);
         assert_eq!(
-            line_counter, 0x01,
-            "a 0-lines-encoded entry must reload the next real table entry immediately, not wrap to 127 phantom lines (got {:#04X})",
-            line_counter
+            bus.dma_ref().channel(0).unwrap().hdma_line_counter,
+            0x7F,
+            "whole-byte decrement: 0x80 -> 0x7F (127 wait lines remain)"
+        );
+
+        // Walk the remaining 127 wait lines: no B-bus writes may happen.
+        for _ in 0..127 {
+            tick_dots(&mut bus, 341 - 258);
+            tick_dots(&mut bus, 258);
+        }
+        assert_eq!(
+            bus.ppu_ref().vram_ref().read(0x0002),
+            0x00,
+            "wait lines of the 128-line entry must not transfer anything"
+        );
+
+        // Line 128: the next real entry (1 line, 0xBB) loads and transfers.
+        tick_dots(&mut bus, 341 - 258);
+        tick_dots(&mut bus, 258);
+        assert_eq!(
+            bus.ppu_ref().vram_ref().read(0x0002),
+            0xBB,
+            "after the 128 lines, the next real table entry must load and transfer its data"
         );
     }
 

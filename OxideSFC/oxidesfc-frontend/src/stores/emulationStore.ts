@@ -12,6 +12,9 @@ export interface GameInfo {
   region: string;
   is_valid: boolean;
   validation_errors: string[];
+  /** Non-fatal findings (e.g. unfinalized checksum on beta dumps/ROM hacks):
+   *  the ROM loaded and runs, but this is worth surfacing to the user. */
+  validation_warnings: string[];
 }
 
 export interface VideoFrame {

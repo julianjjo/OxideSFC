@@ -343,7 +343,13 @@ impl Cartridge {
         let bank = (addr >> 16) as u8;
         let offset = (addr & 0xFFFF) as u16;
 
-        if (0xC0..=0xFF).contains(&bank) {
+        // Banks $C0-$FF and $40-$7D both expose the full ROM image 64KB
+        // per bank ($40-$7D is the SlowROM image of $C0-$FD). Leaving
+        // $40-$7D unmapped made every read there return stale open-bus
+        // bytes -- DKC sources DMA tile uploads from these banks, which
+        // rendered as garbage tile rows over the Rare/Nintendo intro
+        // screens.
+        if (0xC0..=0xFF).contains(&bank) || (0x40..=0x7D).contains(&bank) {
             let rom_addr = ((bank & 0x3F) as usize) * 0x10000 + (offset as usize);
             if rom_addr < self.rom.len() {
                 return Some(rom_addr);
@@ -495,6 +501,38 @@ mod tests {
 
         // Address 0x008000 in HiROM maps to 0x008000 physical
         assert_eq!(cart.map_hirom(0x008000), Some(0x008000));
+    }
+
+    #[test]
+    fn hirom_banks_40_to_7d_mirror_the_full_rom_image() {
+        // Real HiROM maps banks $40-$7D as full-64KB ROM banks, the SlowROM
+        // image of $C0-$FD. These were previously unmapped entirely, so
+        // every read there returned stale open-bus bytes -- DKC (a HiROM
+        // cart) reads data through these banks, which surfaced as garbage
+        // graphics. A 4MB image needs the full $40-$7D range to be
+        // reachable (bank & 0x3F * 64KB spans all 4MB).
+        let cart = Cartridge {
+            rom: (0..0x400000u32).map(|i| (i >> 16) as u8).collect(), // 4MB, each byte = its bank index
+            sram: vec![],
+            mapper: MapperType::HiRom,
+            has_sram: false,
+            header: header_stub(),
+        };
+
+        // Bank $40 offset $0000 maps to physical 0x000000 (same as $C0).
+        assert_eq!(cart.map_hirom(0x400000), Some(0x000000));
+        assert_eq!(cart.map_hirom(0x400000), cart.map_hirom(0xC00000));
+
+        // Low half of the bank is ROM too (unlike the $00-$3F system banks).
+        assert_eq!(cart.map_hirom(0x412345), Some(0x012345));
+
+        // Top of the window: $7D:FFFF -> physical 0x3DFFFF.
+        assert_eq!(cart.map_hirom(0x7DFFFF), Some(0x3DFFFF));
+
+        // Banks $7E/$7F are WRAM, never cartridge -- the mapper itself
+        // must not claim them (the bus routes them away first, but the
+        // mapper shouldn't lie about them either).
+        assert_eq!(cart.map_hirom(0x7E0000), None);
     }
 
     #[test]
