@@ -137,6 +137,12 @@ pub struct PpuRegisters {
     /// Shared "mode 7 prev byte" latch used by every $211B-$2120 (and
     /// $210D/$210E's mode-7 side) write pair.
     pub m7_latch: u8,
+    /// Where sprite priority evaluation starts: sprite 0 normally, or
+    /// (OAMADD & $FE) >> 1 when $2103 bit 7 (priority rotation) is set.
+    /// Maintained by `SystemBus`'s OAMADD writes and the vblank OAM-address
+    /// reload; the renderer's per-line sprite evaluation and overlap
+    /// ordering both start here.
+    pub first_sprite: u8,
 }
 
 impl PpuRegisters {
@@ -186,6 +192,7 @@ impl PpuRegisters {
         put_u16(out, self.m7_hofs);
         put_u16(out, self.m7_vofs);
         put_u8(out, self.m7_latch);
+        put_u8(out, self.first_sprite);
     }
 
     /// Restores state produced by `save_state`.
@@ -233,6 +240,7 @@ impl PpuRegisters {
         self.m7_hofs = r.u16()?;
         self.m7_vofs = r.u16()?;
         self.m7_latch = r.u8()?;
+        self.first_sprite = r.u8()?;
         Ok(())
     }
 }
@@ -277,6 +285,7 @@ impl Default for PpuRegisters {
             m7_hofs: 0,
             m7_vofs: 0,
             m7_latch: 0,
+            first_sprite: 0,
         }
     }
 }
@@ -501,11 +510,15 @@ impl Ppu {
     }
 
     /// Checks if currently in horizontal blanking period
-    /// 
+    ///
     /// # Returns
-    /// True if in hblank (pixel 256-339)
+    /// True if in hblank. The real HBlank flag window is dot 274 through
+    /// dot 0 of the next line (snes9x `SNES_HBLANK_START_HC` = 1096
+    /// master cycles = dot 274, `SNES_HBLANK_END_HC` = 4 = dot 1), NOT
+    /// dot 256 -- the PPU keeps fetching sprite/BG data for the next line
+    /// until dot ~274, and HDMA fires at that point too.
     pub fn in_hblank(&self) -> bool {
-        self.h_counter >= 256
+        self.h_counter >= 274 || self.h_counter < 1
     }
 
     // ==================== Save states ====================
@@ -687,14 +700,23 @@ mod tests {
     #[test]
     fn ppu_hblank() {
         let mut ppu = Ppu::new();
-        
-        // Pixel 256 starts hblank
-        for _ in 0..256 {
+
+        // The HBlank flag window is dot 274 through dot 0 of the next
+        // line (the PPU keeps fetching next-line data until ~274), NOT
+        // dot 256 where the visible picture ends.
+        assert!(ppu.in_hblank(), "dot 0 is still inside the previous line's hblank window");
+        ppu.tick();
+        assert!(!ppu.in_hblank(), "dot 1 leaves hblank");
+        for _ in 1..256 {
             ppu.tick();
         }
-        
-        assert!(ppu.in_hblank());
         assert_eq!(ppu.h_counter(), 256);
+        assert!(!ppu.in_hblank(), "dot 256 (end of picture) is not yet hblank");
+        for _ in 256..274 {
+            ppu.tick();
+        }
+        assert_eq!(ppu.h_counter(), 274);
+        assert!(ppu.in_hblank(), "hblank begins at dot 274");
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub fn render_frame(vram: &Vram, cgram: &Cgram, oam: &Oam, regs: &PpuRegisters) 
     let n = SCREEN_WIDTH * SCREEN_HEIGHT;
     let mut fb = vec![0u8; n * 4];
     let mut scratch = BandScratch::new();
-    render_band(&mut fb, &mut scratch, 0, SCREEN_HEIGHT, vram, cgram, oam, regs);
+    let _ = render_band(&mut fb, &mut scratch, 0, SCREEN_HEIGHT, vram, cgram, oam, regs);
     fb
 }
 
@@ -71,6 +71,20 @@ pub fn render_frame_per_scanline(
     oam: &Oam,
     lines: &[PpuRegisters],
 ) -> Vec<u8> {
+    render_frame_per_scanline_with_status(vram, cgram, oam, lines).0
+}
+
+/// Like `render_frame_per_scanline`, but also returns the frame's STAT77
+/// sprite-overflow flags (bit 6 = range over: more than 32 sprites on
+/// some line; bit 7 = time over: more than 34 8-pixel sprite tiles on
+/// some line), accumulated by the per-line sprite evaluation across every
+/// rendered band. `SystemBus::render_frame` feeds these into $213E.
+pub fn render_frame_per_scanline_with_status(
+    vram: &Vram,
+    cgram: &Cgram,
+    oam: &Oam,
+    lines: &[PpuRegisters],
+) -> (Vec<u8>, u8) {
     assert_eq!(
         lines.len(),
         SCREEN_HEIGHT,
@@ -79,15 +93,17 @@ pub fn render_frame_per_scanline(
     let n = SCREEN_WIDTH * SCREEN_HEIGHT;
     let mut fb = vec![0u8; n * 4];
     let mut scratch = BandScratch::new();
+    let mut range_time_over = 0u8;
 
     let mut band_start = 0usize;
     for y in 1..=SCREEN_HEIGHT {
         if y == SCREEN_HEIGHT || lines[y] != lines[band_start] {
-            render_band(&mut fb, &mut scratch, band_start, y, vram, cgram, oam, &lines[band_start]);
+            range_time_over |=
+                render_band(&mut fb, &mut scratch, band_start, y, vram, cgram, oam, &lines[band_start]);
             band_start = y;
         }
     }
-    fb
+    (fb, range_time_over)
 }
 
 /// Full-screen-sized compositing buffers reused across bands so a
@@ -125,17 +141,23 @@ fn render_band(
     cgram: &Cgram,
     oam: &Oam,
     regs: &PpuRegisters,
-) {
+) -> u8 {
     if (regs.inidisp & 0x80) != 0 {
-        // Forced blank: real hardware outputs solid black.
+        // Forced blank: real hardware outputs solid black (and evaluates
+        // no sprites, so no range/time-over flags either).
         for px in fb[y0 * SCREEN_WIDTH * 4..y1 * SCREEN_WIDTH * 4].chunks_exact_mut(4) {
             px[0] = 0;
             px[1] = 0;
             px[2] = 0;
             px[3] = 0xFF;
         }
-        return;
+        return 0;
     }
+
+    // Hardware sprite evaluation: which sprites survive the 32-per-line /
+    // 34-tiles-per-line limits on each of this band's lines (shared by
+    // the main- and subscreen passes -- it depends only on OAM and OBSEL).
+    let sprite_eval = evaluate_sprites(oam, regs, y0, y1);
 
     let backdrop = cgram.read_color(0) & 0x7FFF;
 
@@ -145,7 +167,7 @@ fn render_band(
         scratch.main[i] = backdrop;
         scratch.main_layer[i] = LAYER_BACKDROP;
     }
-    render_layers(&mut scratch.main, &mut scratch.main_layer, regs.tm, regs.tmw, vram, cgram, oam, regs, y0, y1);
+    render_layers(&mut scratch.main, &mut scratch.main_layer, regs.tm, regs.tmw, vram, cgram, oam, regs, &sprite_eval, y0, y1);
 
     // Subscreen: only needed when color math blends with it (CGWSEL bit 1);
     // otherwise the fixed COLDATA color is the second operand. TSW is the
@@ -156,7 +178,7 @@ fn render_band(
             scratch.sub[i] = backdrop;
             scratch.sub_layer[i] = LAYER_BACKDROP;
         }
-        render_layers(&mut scratch.sub, &mut scratch.sub_layer, regs.ts, regs.tsw, vram, cgram, oam, regs, y0, y1);
+        render_layers(&mut scratch.sub, &mut scratch.sub_layer, regs.ts, regs.tsw, vram, cgram, oam, regs, &sprite_eval, y0, y1);
     }
 
     // Only the 6 per-layer enable bits participate in the layer gate --
@@ -213,6 +235,81 @@ fn render_band(
         fb[o + 2] = b;
         fb[o + 3] = 0xFF;
     }
+
+    sprite_eval.range_time_over
+}
+
+/// Per-scanline sprite evaluation results for one band: bit N of
+/// `masks[line - y0]` says sprite N survived the hardware's per-line
+/// limits (at most 32 sprites in range, at most 34 8-pixel tiles) on that
+/// line, plus the accumulated STAT77 flags (bit 6 = range over, bit 7 =
+/// time over). Evaluation walks OAM starting at `PpuRegisters::
+/// first_sprite` exactly like the hardware's priority scan (snes9x
+/// gfx.cpp `SetupOBJ`).
+struct SpriteEval {
+    y0: usize,
+    masks: Vec<u128>,
+    range_time_over: u8,
+}
+
+fn evaluate_sprites(oam: &Oam, regs: &PpuRegisters, y0: usize, y1: usize) -> SpriteEval {
+    let (small_size, large_size) = sprite_size_pair((regs.obsel >> 5) & 0x07);
+    let first = regs.first_sprite & 0x7F;
+
+    // Decode each sprite's screen rectangle once.
+    let mut geom = [(0i32, 0i32, 0u32, 0u32); 128];
+    for (s, slot) in geom.iter_mut().enumerate() {
+        let base = (s * 4) as u16;
+        let x_low = oam.read(base);
+        let y_raw = oam.read(base + 1);
+        let high_table_byte = oam.read(512 + (s as u16) / 4);
+        let shift = ((s % 4) * 2) as u8;
+        let x_high_bit = (high_table_byte >> shift) & 0x01;
+        let size_bit = (high_table_byte >> (shift + 1)) & 0x01;
+        let (w, h) = if size_bit != 0 { large_size } else { small_size };
+        let x_full = ((x_high_bit as u16) << 8) | (x_low as u16);
+        let x: i32 = if x_full & 0x100 != 0 { (x_full as i32) - 512 } else { x_full as i32 };
+        let y: i32 = if y_raw >= 0xF0 { (y_raw as i32) - 256 } else { y_raw as i32 };
+        *slot = (x, y, w, h);
+    }
+
+    let mut masks = vec![0u128; y1 - y0];
+    let mut range_time_over = 0u8;
+    for line in y0..y1 {
+        let ly = line as i32;
+        let mut in_range = 0u32;
+        let mut tiles = 34i32;
+        let mut mask = 0u128;
+        for k in 0..128u8 {
+            let s = (first.wrapping_add(k) & 0x7F) as usize;
+            let (x, y, w, h) = geom[s];
+            if ly < y || ly >= y + h as i32 {
+                continue;
+            }
+            if x + (w as i32) <= 0 || x >= SCREEN_WIDTH as i32 {
+                continue;
+            }
+            if in_range >= 32 {
+                range_time_over |= 0x40; // range over: a 33rd sprite on this line
+                continue;
+            }
+            in_range += 1;
+            if tiles <= 0 {
+                range_time_over |= 0x80; // no tile budget left: sprite dropped
+                continue;
+            }
+            tiles -= (w / 8) as i32;
+            if tiles < 0 {
+                // Budget ran out inside this sprite: flag time-over. (Real
+                // hardware truncates the sprite's trailing tiles; drawing
+                // it whole keeps this simple and errs on the visible side.)
+                range_time_over |= 0x80;
+            }
+            mask |= 1u128 << s;
+        }
+        masks[line - y0] = mask;
+    }
+    SpriteEval { y0, masks, range_time_over }
 }
 
 /// One entry in a mode's back-to-front compositing order: either a BG
@@ -279,6 +376,7 @@ fn render_layers(
     cgram: &Cgram,
     oam: &Oam,
     regs: &PpuRegisters,
+    sprite_eval: &SpriteEval,
     y0: usize,
     y1: usize,
 ) {
@@ -304,20 +402,20 @@ fn render_layers(
             draw_mode7_layer(buf, layer_buf, vram, cgram, regs, true, 0, &skip[1], y0, y1);
         }
         if mask & 0x10 != 0 {
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, 0, &skip[4], y0, y1);
+            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 0, &skip[4], y0, y1);
         }
         if mask & 0x01 != 0 {
             draw_mode7_layer(buf, layer_buf, vram, cgram, regs, false, 0, &skip[0], y0, y1);
         }
         if mask & 0x10 != 0 {
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, 1, &skip[4], y0, y1);
+            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 1, &skip[4], y0, y1);
         }
         if extbg && mask & 0x02 != 0 {
             draw_mode7_layer(buf, layer_buf, vram, cgram, regs, true, 1, &skip[1], y0, y1);
         }
         if mask & 0x10 != 0 {
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, 2, &skip[4], y0, y1);
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, 3, &skip[4], y0, y1);
+            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 2, &skip[4], y0, y1);
+            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 3, &skip[4], y0, y1);
         }
         return;
     }
@@ -335,7 +433,7 @@ fn render_layers(
             }
             DrawOp::Obj(prio) => {
                 if mask & 0x10 != 0 {
-                    draw_sprites(buf, layer_buf, vram, cgram, oam, regs, prio, &skip[4], y0, y1);
+                    draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, prio, &skip[4], y0, y1);
                 }
             }
         }
@@ -746,6 +844,47 @@ fn draw_bg_layer(
         })
     };
 
+    // Offset-per-tile (modes 2/4, and 6 on hardware): BG3's tilemap
+    // doubles as a table of per-8-pixel-column scroll overrides for
+    // BG1/BG2. The first visible column always uses the normal scroll;
+    // for screen column N >= 1 the entry fetched from BG3's tilemap at
+    // world position ((N-1)*8 + (BG3HOFS & ~7), BG3VOFS) replaces the
+    // horizontal offset (the BG's own fine scroll, HOFS & 7, still
+    // applies), and in mode 2 the entry one tile-row below (BG3VOFS + 8)
+    // replaces the vertical offset. Mode 4 fetches a single entry whose
+    // bit 15 selects H or V. Entry bit 13 gates the override for BG1,
+    // bit 14 for BG2 (fullsnes "OPT"; snes9x gfx.cpp
+    // DrawBackgroundOffset). Hi-res mode 6's 512-dot variant is not
+    // modeled.
+    let opt_active = !hires && (mode == 2 || mode == 4) && bg < 2;
+    let opt_valid_mask: u16 = 0x2000 << bg;
+    let bg3_tilemap_base_word = ((regs.bg_sc[2] >> 2) as u16) * 0x400;
+    let bg3_screen_size = regs.bg_sc[2] & 0x03;
+    let bg3_hofs = regs.bg_hofs[2];
+    let bg3_vofs = regs.bg_vofs[2];
+    let bg3_entry = |world_x: u32, world_y: u32| -> u16 {
+        let (map_w, map_h): (u32, u32) = match bg3_screen_size {
+            0 => (32, 32),
+            1 => (64, 32),
+            2 => (32, 64),
+            _ => (64, 64),
+        };
+        let tile_col = (world_x / 8) % map_w;
+        let tile_row = (world_y / 8) % map_h;
+        let (quad_col, local_col) = (tile_col / 32, tile_col % 32);
+        let (quad_row, local_row) = (tile_row / 32, tile_row % 32);
+        let quadrant: u32 = match bg3_screen_size {
+            0 => 0,
+            1 => quad_col,
+            2 => quad_row,
+            _ => quad_row * 2 + quad_col,
+        };
+        let word = bg3_tilemap_base_word
+            .wrapping_add((quadrant * 0x400) as u16)
+            .wrapping_add((local_row * 32 + local_col) as u16);
+        vram.read_word(word.wrapping_mul(2))
+    };
+
     for py in y0..y1 {
         let eff_py = py - py % mosaic_size;
         for px in 0..SCREEN_WIDTH {
@@ -783,8 +922,33 @@ fn draw_bg_layer(
                 }
                 average_bgr555(&samples[..count])
             } else {
-                let world_x = (eff_px as u32).wrapping_add(hofs as u32);
-                let world_y = (eff_py as u32).wrapping_add(vofs as u32);
+                let (mut eff_hofs, mut eff_vofs) = (hofs, vofs);
+                if opt_active {
+                    let col = ((px as u32) + ((hofs as u32) & 7)) / 8;
+                    if col > 0 {
+                        let opt_x = ((col - 1) * 8).wrapping_add((bg3_hofs as u32) & !7u32);
+                        let hentry = bg3_entry(opt_x, bg3_vofs as u32);
+                        if mode == 4 {
+                            if hentry & opt_valid_mask != 0 {
+                                if hentry & 0x8000 != 0 {
+                                    eff_vofs = hentry & 0x3FF;
+                                } else {
+                                    eff_hofs = (hentry & 0x3F8) | (hofs & 7);
+                                }
+                            }
+                        } else {
+                            let ventry = bg3_entry(opt_x, (bg3_vofs as u32).wrapping_add(8));
+                            if hentry & opt_valid_mask != 0 {
+                                eff_hofs = (hentry & 0x3F8) | (hofs & 7);
+                            }
+                            if ventry & opt_valid_mask != 0 {
+                                eff_vofs = ventry & 0x3FF;
+                            }
+                        }
+                    }
+                }
+                let world_x = (eff_px as u32).wrapping_add(eff_hofs as u32);
+                let world_y = (eff_py as u32).wrapping_add(eff_vofs as u32);
                 match sample(world_x, world_y) {
                     Some(c) => c,
                     None => continue,
@@ -824,6 +988,7 @@ fn draw_sprites(
     cgram: &Cgram,
     oam: &Oam,
     regs: &PpuRegisters,
+    sprite_eval: &SpriteEval,
     want_priority: u8,
     skip: &[bool; SCREEN_WIDTH],
     y0: usize,
@@ -841,13 +1006,17 @@ fn draw_sprites(
     let name_select = ((regs.obsel >> 3) & 0x03) as u16;
     let (small_size, large_size) = sprite_size_pair((regs.obsel >> 5) & 0x07);
 
-    // Iterate high-index -> low-index so that, within this priority level,
-    // lower-index sprites end up drawn last (on top) -- matching real
-    // hardware's "lower OAM index wins on overlap" ordering. Only sprites
-    // whose OAM priority (attr bits 4-5) equals `want_priority` are drawn
-    // in this pass; the caller invokes the four priority levels in the
+    // Iterate in reverse rotation order so that, within this priority
+    // level, the sprite closest to FirstSprite ends up drawn last (on
+    // top) -- hardware's overlap rule is "closest to FirstSprite in
+    // evaluation order wins", which reduces to "lower OAM index wins"
+    // when priority rotation is off (FirstSprite = 0). Only sprites whose
+    // OAM priority (attr bits 4-5) equals `want_priority` are drawn in
+    // this pass; the caller invokes the four priority levels in the
     // correct back-to-front slots for the current BG mode.
-    for sprite_idx in (0..128u8).rev() {
+    let first_sprite = regs.first_sprite & 0x7F;
+    for k in (0..128u8).rev() {
+        let sprite_idx = first_sprite.wrapping_add(k) & 0x7F;
         let base = (sprite_idx as usize) * 4;
         // OAM entry layout per fullsnes: byte 0 = X (low 8 bits), byte 1 =
         // Y, byte 2 = tile, byte 3 = attributes. These first two used to
@@ -898,6 +1067,11 @@ fn draw_sprites(
         for ty in 0..h {
             let screen_y = y + ty as i32;
             if screen_y < y0 as i32 || screen_y >= y1 as i32 {
+                continue;
+            }
+            // Hardware per-line limits: skip lines where this sprite lost
+            // the 32-sprites/34-tiles evaluation (see `evaluate_sprites`).
+            if sprite_eval.masks[screen_y as usize - sprite_eval.y0] & (1u128 << sprite_idx) == 0 {
                 continue;
             }
             let src_ty = if flip_v { h - 1 - ty } else { ty };
@@ -1766,6 +1940,172 @@ mod tests {
 
     fn oam_empty() -> Oam {
         Oam::new()
+    }
+
+    /// Builds an OAM where each of `count` small sprites shows exactly ONE
+    /// opaque pixel at its top-left corner (tile 0 must have pixel value 1
+    /// at (0,0) only), sprite `i` at (x_step * i, 10). `large` also sets
+    /// every sprite's size bit (OBSEL pair 0: 8x8 small / 16x16 large).
+    fn oam_with_sprite_row(count: usize, x_step: u8, large: bool) -> Oam {
+        let mut oam = Oam::new();
+        for i in 0..count {
+            let base = (i * 4) as u16;
+            oam.write(base, (i as u8).wrapping_mul(x_step)); // X
+            oam.write(base + 1, 10); // Y
+            oam.write(base + 2, 0); // tile 0
+            oam.write(base + 3, 0x00); // palette 0, priority 0
+        }
+        // Park every other sprite off-screen (Y = 0xF0 = -16 with an 8px
+        // sprite ends at line -8, never visible).
+        for i in count..128 {
+            let base = (i * 4) as u16;
+            oam.write(base + 1, 0xF0);
+        }
+        if large {
+            for i in 0..count {
+                let byte = 512 + (i as u16) / 4;
+                let old = oam.read(byte);
+                oam.write(byte, old | (0x02 << ((i % 4) * 2)));
+            }
+        }
+        oam
+    }
+
+    fn single_pixel_sprite_setup() -> (Vram, Cgram, PpuRegisters) {
+        let mut vram = Vram::new();
+        let mut cgram = Cgram::new();
+        // OBJ tile 0: pixel value 1 at (0,0), rest transparent.
+        let mut tile_row0 = [0u8; 8];
+        tile_row0[0] = 1;
+        let tile = make_2bpp_tile([tile_row0, [0; 8], [0; 8], [0; 8], [0; 8], [0; 8], [0; 8], [0; 8]]);
+        for (i, &b) in tile.iter().enumerate() {
+            vram.write(i as u16, b);
+        }
+        cgram.write(129 * 2, 0xE0); // OBJ palette 0, pixel 1
+        cgram.write(129 * 2 + 1, 0x03);
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F;
+        regs.obsel = 0x00;
+        regs.tm = 0x10; // sprites only
+        (vram, cgram, regs)
+    }
+
+    #[test]
+    fn sprite_range_limit_drops_the_33rd_sprite_on_a_line_and_flags_stat77() {
+        // Hardware evaluates at most 32 sprites per scanline; a 33rd
+        // in-range sprite is not drawn and sets STAT77 bit 6 (range over).
+        let (vram, cgram, regs) = single_pixel_sprite_setup();
+        let oam = oam_with_sprite_row(33, 7, false); // all 33 share lines 10-17
+        let lines = vec![regs; SCREEN_HEIGHT];
+        let (fb, flags) = render_frame_per_scanline_with_status(&vram, &cgram, &oam, &lines);
+
+        let drawn = (10 * SCREEN_WIDTH) * 4; // sprite 0's pixel at (0,10)
+        assert_ne!((fb[drawn], fb[drawn + 1], fb[drawn + 2]), (0, 0, 0), "sprite 0 must render");
+        let dropped = (10 * SCREEN_WIDTH + 32 * 7) * 4; // sprite 32's pixel
+        assert_eq!(
+            (fb[dropped], fb[dropped + 1], fb[dropped + 2]),
+            (0, 0, 0),
+            "the 33rd sprite on the line must be dropped by the range limit"
+        );
+        assert_ne!(flags & 0x40, 0, "STAT77 range-over flag must be set");
+        assert_eq!(flags & 0x80, 0, "33 8x8 sprites = 32 evaluated tiles: no time-over");
+    }
+
+    #[test]
+    fn sprite_tile_budget_drops_sprites_past_34_tiles_and_flags_time_over() {
+        // 18 sprites of 16x16 = 2 tiles each on one line: the first 17
+        // consume the full 34-tile budget, the 18th is dropped and STAT77
+        // bit 7 (time over) sets.
+        let (vram, cgram, regs) = single_pixel_sprite_setup();
+        let oam = oam_with_sprite_row(18, 14, true);
+        let lines = vec![regs; SCREEN_HEIGHT];
+        let (fb, flags) = render_frame_per_scanline_with_status(&vram, &cgram, &oam, &lines);
+
+        let drawn = (10 * SCREEN_WIDTH) * 4;
+        assert_ne!((fb[drawn], fb[drawn + 1], fb[drawn + 2]), (0, 0, 0), "sprite 0 must render");
+        let dropped = (10 * SCREEN_WIDTH + 17 * 14) * 4; // sprite 17's top-left pixel
+        assert_eq!(
+            (fb[dropped], fb[dropped + 1], fb[dropped + 2]),
+            (0, 0, 0),
+            "the sprite past the 34-tile budget must be dropped"
+        );
+        assert_ne!(flags & 0x80, 0, "STAT77 time-over flag must be set");
+    }
+
+    #[test]
+    fn first_sprite_rotation_changes_which_sprite_wins_overlaps() {
+        // With $2103 bit 7 priority rotation, evaluation (and overlap
+        // priority) starts at FirstSprite instead of sprite 0.
+        let (vram, mut cgram, mut regs) = single_pixel_sprite_setup();
+        // Sprite 1 uses OBJ palette 1 so the two sprites are colorimetrically
+        // distinguishable (CGRAM 128 + 16 + 1 = 145).
+        cgram.write(145 * 2, 0x1F);
+        cgram.write(145 * 2 + 1, 0x00);
+
+        let mut oam = oam_empty();
+        for i in 0..2u16 {
+            oam.write(i * 4, 20); // both at (20, 10)
+            oam.write(i * 4 + 1, 10);
+            oam.write(i * 4 + 2, 0);
+            oam.write(i * 4 + 3, if i == 1 { 0b0000_0010 } else { 0 }); // sprite 1: palette 1
+        }
+        for i in 2..128u16 {
+            oam.write(i * 4 + 1, 0xF0);
+        }
+
+        let idx = (10 * SCREEN_WIDTH + 20) * 4;
+        let fb = render_frame(&vram, &cgram, &oam, &regs);
+        let sprite0_color = bgr555_to_rgb8(cgram.read_color(129));
+        assert_eq!((fb[idx], fb[idx + 1], fb[idx + 2]), sprite0_color, "FirstSprite 0: sprite 0 wins the overlap");
+
+        regs.first_sprite = 1;
+        let fb = render_frame(&vram, &cgram, &oam, &regs);
+        let sprite1_color = bgr555_to_rgb8(cgram.read_color(145));
+        assert_eq!((fb[idx], fb[idx + 1], fb[idx + 2]), sprite1_color, "FirstSprite 1: sprite 1 now has the highest priority");
+    }
+
+    #[test]
+    fn offset_per_tile_mode2_overrides_bg1_h_scroll_per_column() {
+        // Mode 2: BG3's tilemap supplies per-8-pixel-column scroll
+        // overrides. Column 0 always uses the normal scroll; column 1's
+        // override entry (BG3 map tile (0,0)) redirects BG1's horizontal
+        // offset so the solid tile at world column 0 repeats there;
+        // column 2 has no valid override and stays at the normal scroll.
+        let mut vram = Vram::new();
+        let mut cgram = Cgram::new();
+
+        // BG1 4bpp tile 1: solid pixel value 1 (plane 0 = 0xFF each row).
+        for row in 0..8u16 {
+            vram.write(32 + row * 2, 0xFF);
+        }
+        // BG1 tilemap at word 0x400: tile 1 at map position (0,0) only.
+        vram.write(0x800, 0x01);
+        vram.write(0x801, 0x00);
+        // BG3 tilemap at word 0x800: OPT entry for screen column 1 --
+        // valid-for-BG1 (bit 13) + H offset 0x3F8 (walks the sample back
+        // to world column 0: 8 + 1016 wraps to tile 0 of the 256-wide map).
+        vram.write(0x1000, 0xF8);
+        vram.write(0x1001, 0x23);
+
+        cgram.write(1 * 2, 0xE0); // BG palette 0, pixel 1
+        cgram.write(1 * 2 + 1, 0x03);
+
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F;
+        regs.bgmode = 2;
+        regs.tm = 0x01; // BG1 only
+        regs.bg_sc[0] = 0x04; // BG1 tilemap base word 0x400
+        regs.bg_sc[2] = 0x08; // BG3 tilemap base word 0x800 (the OPT table)
+
+        let fb = render_frame(&vram, &cgram, &oam_empty(), &regs);
+        let color = bgr555_to_rgb8(cgram.read_color(1));
+        let px = |x: usize| {
+            let i = (0 * SCREEN_WIDTH + x) * 4;
+            (fb[i], fb[i + 1], fb[i + 2])
+        };
+        assert_eq!(px(0), color, "column 0 uses the normal (zero) scroll: tile 1 shows");
+        assert_eq!(px(8), color, "column 1's OPT entry must override BG1's H offset");
+        assert_eq!(px(16), (0, 0, 0), "column 2 has no valid OPT entry: backdrop");
     }
 
     #[test]
