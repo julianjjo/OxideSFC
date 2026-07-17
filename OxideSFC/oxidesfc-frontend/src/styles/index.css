@@ -61,6 +61,264 @@ body {
   image-rendering: auto;
 }
 
+/* ---------------------------------------------------------------------------
+   Emulator play view
+   ---------------------------------------------------------------------------
+   The play view is a full-bleed black stage; all chrome lives in a single
+   floating "control deck" that auto-hides during play. Signature element:
+   a hard-stop four-color pinstripe across the deck's top edge, quoting the
+   Super Famicom logo colors. */
+
+:root {
+  --sfc-red: #e5484d;
+  --sfc-yellow: #f0b429;
+  --sfc-green: #3fa34d;
+  --sfc-blue: #3e63dd;
+  --deck-bg: rgba(10, 12, 22, 0.86);
+  --deck-border: rgba(148, 163, 184, 0.16);
+  --deck-text: #e6e8ef;
+  --deck-muted: #8b90a0;
+}
+
+.sfc-pinstripe {
+  background: linear-gradient(
+    90deg,
+    var(--sfc-red) 0 25%,
+    var(--sfc-yellow) 25% 50%,
+    var(--sfc-green) 50% 75%,
+    var(--sfc-blue) 75% 100%
+  );
+}
+
+.control-deck {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border-radius: 14px;
+  border: 1px solid var(--deck-border);
+  background: var(--deck-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  color: var(--deck-text);
+  overflow: hidden;
+  transition: transform 0.22s ease, opacity 0.22s ease;
+}
+
+/* Signature: SFC four-color pinstripe along the deck's top edge. */
+.control-deck::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--sfc-red) 0 25%,
+    var(--sfc-yellow) 25% 50%,
+    var(--sfc-green) 50% 75%,
+    var(--sfc-blue) 75% 100%
+  );
+}
+
+.control-deck--hidden {
+  opacity: 0;
+  transform: translateY(calc(100% + 1rem));
+  pointer-events: none;
+}
+
+.control-deck--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.deck-divider {
+  width: 1px;
+  height: 1.75rem;
+  margin: 0 0.25rem;
+  background: var(--deck-border);
+  flex: none;
+}
+
+.deck-info {
+  font-size: 0.625rem;
+  letter-spacing: 0.03em;
+  color: var(--deck-muted);
+  white-space: nowrap;
+}
+
+.deck-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  flex: none;
+}
+
+.deck-status-dot--running {
+  background: var(--sfc-green);
+  box-shadow: 0 0 6px rgba(63, 163, 77, 0.8);
+}
+
+.deck-status-dot--paused {
+  background: var(--sfc-yellow);
+  box-shadow: 0 0 6px rgba(240, 180, 41, 0.8);
+}
+
+.deck-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  color: #b6bac6;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  flex: none;
+}
+
+.deck-btn:hover,
+.deck-btn:focus-visible {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--deck-text);
+}
+
+.deck-btn:focus-visible {
+  outline: 2px solid var(--sfc-blue);
+  outline-offset: 1px;
+}
+
+.deck-btn--emphasis {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--deck-text);
+}
+
+/* Super Famicom face-button tints, revealed on hover/focus only. */
+.deck-btn--red:hover,
+.deck-btn--red:focus-visible { color: var(--sfc-red); background: rgba(229, 72, 77, 0.14); }
+.deck-btn--yellow:hover,
+.deck-btn--yellow:focus-visible { color: var(--sfc-yellow); background: rgba(240, 180, 41, 0.14); }
+.deck-btn--green:hover,
+.deck-btn--green:focus-visible { color: var(--sfc-green); background: rgba(63, 163, 77, 0.16); }
+.deck-btn--blue:hover,
+.deck-btn--blue:focus-visible { color: #7d97f5; background: rgba(62, 99, 221, 0.2); }
+
+.deck-speed {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--deck-border);
+  border-radius: 10px;
+  overflow: hidden;
+  flex: none;
+}
+
+.deck-speed-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 2rem;
+  color: #b6bac6;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.deck-speed-step:hover,
+.deck-speed-step:focus-visible {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--deck-text);
+}
+
+.deck-speed-step:focus-visible,
+.deck-speed-value:focus-visible {
+  outline: 2px solid var(--sfc-blue);
+  outline-offset: -2px;
+}
+
+.deck-speed-value {
+  min-width: 3.9rem;
+  height: 2rem;
+  font-size: 0.75rem;
+  color: var(--deck-muted);
+  border-left: 1px solid var(--deck-border);
+  border-right: 1px solid var(--deck-border);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.deck-speed-value:hover {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--deck-text);
+}
+
+.deck-speed-value--modified {
+  color: var(--sfc-yellow);
+}
+
+/* Transient feedback pill (save/load/screenshot results). */
+.emu-toast {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 0.4rem 0.9rem;
+  border-radius: 9999px;
+  border: 1px solid var(--deck-border);
+  background: var(--deck-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--deck-text);
+  font-size: 0.8rem;
+  animation: fadeIn 0.15s ease-out;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.emu-toast--err {
+  border-color: rgba(229, 72, 77, 0.5);
+  color: #f1a6a8;
+}
+
+.emu-paused-chip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  padding: 0.5rem 1.1rem;
+  border-radius: 9999px;
+  border: 1px solid var(--deck-border);
+  background: var(--deck-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--deck-text);
+  font-size: 0.85rem;
+  animation: fadeIn 0.15s ease-out;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.emu-paused-chip .key-hint {
+  color: var(--deck-muted);
+}
+
+/* Hide the pointer while chrome is hidden and the game has the screen. */
+.emu-stage--idle {
+  cursor: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control-deck {
+    transition: opacity 0.15s ease;
+  }
+  .control-deck--hidden {
+    transform: none;
+  }
+}
+
 /* Animations */
 @keyframes fadeIn {
   from { opacity: 0; }
