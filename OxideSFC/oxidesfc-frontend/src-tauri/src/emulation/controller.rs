@@ -232,6 +232,11 @@ pub struct GameInfo {
     pub region: String,
     pub is_valid: bool,
     pub validation_errors: Vec<String>,
+    /// Non-fatal validation findings: the ROM still loads and runs, but
+    /// something about it is worth surfacing to the user (e.g. a stored
+    /// checksum that doesn't match the file's contents -- normal for beta/
+    /// prototype dumps and ROM hacks, whose headers were never finalized).
+    pub validation_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +354,12 @@ impl EmulationController {
             warn!("ROM validation failed: {:?}", game_info.validation_errors);
             return Err(format!("Invalid ROM file: {}", game_info.validation_errors.join(", ")));
         }
+        if !game_info.validation_warnings.is_empty() {
+            warn!(
+                "ROM loaded with warnings: {:?}",
+                game_info.validation_warnings
+            );
+        }
 
         self.snes = Some(snes);
         self.current_game = Some(game_info.clone());
@@ -360,10 +371,14 @@ impl EmulationController {
 
     /// Builds `GameInfo` from the cartridge header `oxidesfc_core` actually
     /// parsed and validated for `snes`, rather than re-parsing the raw file
-    /// bytes with separate logic. `is_valid` requires the ROM's own
-    /// checksum to match its recomputed value -- the strongest available
-    /// proof the file was read and mapped correctly, not just "a header
-    /// shaped thing was found somewhere".
+    /// bytes with separate logic. `is_valid` (which gates loading) only
+    /// requires an internally-consistent header (checksum ^ complement ==
+    /// 0xFFFF -- the "this is really a SNES header" signal). A stored
+    /// checksum that doesn't match the recomputed one is reported as a
+    /// WARNING, not an error: beta/prototype dumps and ROM hacks routinely
+    /// ship with unfinalized checksums (e.g. "Prince of Persia 2 (USA)
+    /// (Beta)" boots and plays fine), so hard-rejecting on it locked
+    /// perfectly playable ROMs out of the emulator entirely.
     fn build_game_info(snes: &Snes, path: &str, file_size: u64) -> GameInfo {
         let file_name = PathBuf::from(path)
             .file_name()
@@ -372,6 +387,7 @@ impl EmulationController {
             .to_string();
 
         let mut errors = Vec::new();
+        let mut warnings = Vec::new();
 
         let (title, rom_type, rom_size, sram_size, region) = match snes.header() {
             Some(header) => {
@@ -380,8 +396,8 @@ impl EmulationController {
                         "ROM header checksum/complement fields are inconsistent -- this likely isn't a real SNES header".to_string(),
                     );
                 } else if !header.computed_checksum_matches {
-                    errors.push(format!(
-                        "ROM checksum mismatch: header declares {:#06X} but the file's actual contents sum to {:#06X} -- the ROM may be corrupt, truncated, or mis-mapped",
+                    warnings.push(format!(
+                        "ROM checksum mismatch: header declares {:#06X} but the file's actual contents sum to {:#06X} -- common for beta/prototype dumps and ROM hacks, but it can also mean a corrupt or overdumped file",
                         header.checksum, header.computed_checksum
                     ));
                 }
@@ -425,6 +441,7 @@ impl EmulationController {
             region,
             is_valid: errors.is_empty(),
             validation_errors: errors,
+            validation_warnings: warnings,
         }
     }
 
@@ -896,25 +913,37 @@ mod real_rom_tests {
     }
 
     #[test]
-    fn checksum_mismatch_is_rejected_not_silently_accepted() {
-        // Corrupt a byte in the middle of an otherwise-real ROM body (well
-        // away from the header) and confirm EmulationController::load_rom
-        // refuses it instead of reporting a falsely "valid" GameInfo.
+    fn checksum_mismatch_loads_with_a_warning_instead_of_being_rejected() {
+        // A stored-vs-recomputed checksum mismatch cannot distinguish a
+        // corrupt dump from a beta/prototype whose header was simply never
+        // finalized ("Prince of Persia 2 (USA) (Beta)" is a real example
+        // that boots and plays fine). Hard-rejecting on it locked such
+        // ROMs out of the emulator entirely, so the mismatch must load
+        // successfully but be surfaced in `validation_warnings`.
         let raw = std::fs::read(rom_path_str()).unwrap();
-        let mut corrupted = raw.clone();
-        corrupted[10_000] ^= 0xFF;
+        let mut mismatched = raw.clone();
+        mismatched[10_000] ^= 0xFF;
 
         let dir = std::env::temp_dir().join("oxidesfc_test_corrupted_rom");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("corrupted.smc");
-        std::fs::write(&path, &corrupted).unwrap();
+        std::fs::write(&path, &mismatched).unwrap();
 
         let mut controller = EmulationController::new();
         let result = controller.load_rom(path.to_str().unwrap());
 
-        assert!(result.is_err(), "a ROM with a corrupted checksum must not silently load as valid");
-        let err = result.unwrap_err();
-        assert!(err.contains("checksum"), "error should explain *why* it was rejected: {}", err);
+        let info = result.expect("a checksum mismatch alone must not block loading");
+        assert!(info.is_valid, "the ROM must still be reported as loadable");
+        assert!(
+            info.validation_warnings.iter().any(|w| w.contains("checksum")),
+            "the mismatch must be surfaced as a warning: {:?}",
+            info.validation_warnings
+        );
+        assert!(
+            info.validation_errors.is_empty(),
+            "no hard errors expected: {:?}",
+            info.validation_errors
+        );
 
         std::fs::remove_file(&path).ok();
     }
