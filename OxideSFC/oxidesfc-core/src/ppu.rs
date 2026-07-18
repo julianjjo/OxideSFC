@@ -313,6 +313,10 @@ pub struct Ppu {
     /// Interlace field flag, toggled every frame (STAT78 bit 7). In
     /// interlaced modes the two fields carry the odd/even half-lines.
     field: bool,
+    /// SETINI ($2133) bit 2: overscan mode -- the picture spans 239
+    /// lines instead of 224, so vblank (and the NMI) starts at line 239.
+    /// Maintained by `SystemBus`'s $2133 write handler.
+    overscan: bool,
 }
 
 impl Ppu {
@@ -333,6 +337,7 @@ impl Ppu {
             mode,
             frame_ready: false,
             field: false,
+            overscan: false,
         }
     }
 
@@ -486,14 +491,25 @@ impl Ppu {
     }
 
     /// Gets the visible scanlines (not in vblank)
-    /// 
+    ///
     /// # Returns
-    /// Number of visible scanlines (224 for NTSC, 240 for PAL)
+    /// Number of visible scanlines: 239 with SETINI's overscan bit set
+    /// (vblank -- and the NMI -- start at line 239 in overscan mode),
+    /// otherwise 224 for NTSC / 240 for PAL.
     pub fn visible_scanlines(&self) -> u16 {
+        if self.overscan {
+            return 239;
+        }
         match self.mode {
             PpuMode::Ntsc => 224,
             PpuMode::Pal => 240,
         }
+    }
+
+    /// Sets SETINI ($2133) bit 2's overscan mode -- see
+    /// `visible_scanlines`.
+    pub fn set_overscan(&mut self, overscan: bool) {
+        self.overscan = overscan;
     }
 
     /// Checks if currently in vertical blanking period
@@ -538,6 +554,7 @@ impl Ppu {
         });
         put_bool(out, self.frame_ready);
         put_bool(out, self.field);
+        put_bool(out, self.overscan);
     }
 
     /// Restores state produced by `save_state`.
@@ -557,6 +574,7 @@ impl Ppu {
         self.mode = if r.u8()? == 1 { PpuMode::Pal } else { PpuMode::Ntsc };
         self.frame_ready = r.bool()?;
         self.field = r.bool()?;
+        self.overscan = r.bool()?;
         Ok(())
     }
 

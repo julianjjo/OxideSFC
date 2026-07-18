@@ -231,6 +231,12 @@ pub struct SystemBus {
     /// previous `tick_ppu_dots` call -- lets the H/V timer IRQ detect the
     /// exact dot crossing instead of firing at scanline granularity.
     last_h_dot: u16,
+    /// Channels HDMA has touched since a general DMA last checked: when
+    /// a per-line HDMA fires mid-transfer on the SAME channel a $420B
+    /// DMA is using, the DMA is killed immediately and its $43x2/$43x5
+    /// stop updating (snes9x `CPU.HDMARanInDMA`, dma.cpp). Ephemeral
+    /// within one $420B write -- not serialized.
+    hdma_ran_channels: u8,
     /// Bus accesses made since the last `take_step_access_costs` call,
     /// and their summed master-cycle cost per the real per-region access
     /// speeds (6/8/12 master cycles, FastROM-aware -- see
@@ -333,6 +339,7 @@ impl SystemBus {
             range_time_over: 0,
             refresh_charged_this_line: false,
             last_h_dot: 0,
+            hdma_ran_channels: 0,
             step_access_count: 0,
             step_access_master: 0,
             accounting_suspended: 0,
@@ -629,8 +636,12 @@ impl SystemBus {
             // (snes9x: HC_HDMA_INIT_EVENT at V=0, HC=20). That line's own
             // hblank then runs the first per-line transfer, so the first
             // visible row already renders with the first table entry's
-            // values.
+            // values. The RDNMI vblank flag also expires here: hardware
+            // clears it at the end of the blanking period even if $4210
+            // was never read (snes9x resets FillRAM[$4210] to the CPU
+            // version at the V-counter wrap).
             if line == lines_per_frame - 1 {
+                self.nmi_status_flag = false;
                 self.hdma_init();
             }
         }
@@ -719,7 +730,15 @@ impl SystemBus {
     /// the increment happens after the low-byte write (bit clear) or the
     /// high-byte write (bit set), bits 0-1 select the increment amount
     /// (1/32/128 words).
+    ///
+    /// The PPU only grants the data port VRAM access during vblank or
+    /// forced blank -- writes during active display are silently dropped
+    /// (address increment included), matching snes9x's
+    /// `BlockInvalidVRAMAccess` / `CHECK_INBLANK` behavior.
     fn vram_write(&mut self, is_high_byte: bool, value: u8) {
+        if !self.ppu.in_vblank() && self.ppu_regs.inidisp & 0x80 == 0 {
+            return;
+        }
         let byte_addr = self
             .vram_remap(self.vmadd)
             .wrapping_mul(2)
@@ -917,6 +936,7 @@ impl SystemBus {
         // accesses. Per-channel setup costs another 8 master cycles up
         // front (snes9x `addCyclesInDMA`'s one-shot SLOW_ONE_CYCLE).
         self.accounting_suspended += 1;
+        self.hdma_ran_channels &= !(1u8 << channel);
         self.tick_master(8);
         while remaining > 0 {
             let a_addr = a_bank | (a_offset as u32);
@@ -942,12 +962,20 @@ impl SystemBus {
             a_offset = a_offset.wrapping_add(step as u16);
             i += 1;
             remaining -= 1;
+            // If a per-line HDMA just ran on THIS channel, the DMA dies
+            // on the spot: the transfer stops mid-way and $43x2/$43x5
+            // reflect the partial progress (snes9x dma.cpp: "If HDMA
+            // triggers in the middle of DMA transfer and it uses the
+            // same channel, it kills the DMA transfer immediately").
+            if self.hdma_ran_channels & (1 << channel) != 0 {
+                break;
+            }
         }
         let final_a1t = a_offset;
         self.dma.write_register(base.wrapping_add(2), (final_a1t & 0xFF) as u8);
         self.dma.write_register(base.wrapping_add(3), ((final_a1t >> 8) & 0xFF) as u8);
-        self.dma.write_register(base.wrapping_add(5), 0);
-        self.dma.write_register(base.wrapping_add(6), 0);
+        self.dma.write_register(base.wrapping_add(5), (remaining & 0xFF) as u8);
+        self.dma.write_register(base.wrapping_add(6), ((remaining >> 8) & 0xFF) as u8);
 
         if let Some(ch) = self.dma.channel_mut(channel) {
             ch.done = true;
@@ -1091,6 +1119,7 @@ impl SystemBus {
                 continue;
             }
             any_active = true;
+            self.hdma_ran_channels |= 1 << i;
 
             if do_transfer {
                 self.hdma_transfer_one_line(i);
@@ -1663,7 +1692,10 @@ impl SystemBus {
                 } else {
                     1
                 };
-                let result = bit as u8;
+                // Only bits 1-0 are driven by the controller port; bits
+                // 7-2 are open bus (snes9x `S9xReadJOYSERn`:
+                // `(OpenBus & ~3) | ...`).
+                let result = (self.open_bus & 0xFC) | bit as u8;
                 self.open_bus = result;
                 return Ok(result);
             }
@@ -1686,7 +1718,10 @@ impl SystemBus {
                 } else {
                     1
                 };
-                let result = bit as u8;
+                // Port 2 additionally hardwires bits 4-2 high on real
+                // hardware; bits 7-5 are open bus (snes9x:
+                // `(OpenBus & ~3) | 0x1c | ...`).
+                let result = (self.open_bus & 0xE0) | 0x1C | bit as u8;
                 self.open_bus = result;
                 return Ok(result);
             }
@@ -1843,9 +1878,19 @@ impl SystemBus {
                 return Ok(());
             }
 
-            // $2100: INIDISP
+            // $2100: INIDISP. Turning forced blank OFF while inside
+            // vblank re-applies the $2102/$2103 OAM-address latch right
+            // away -- the reload that this vblank's entry edge skipped
+            // while the screen was blanked (snes9x mirrors the reload
+            // into its $2100 handler for exactly this case).
             if offset == 0x2100 {
+                let was_blanked = self.ppu_regs.inidisp & 0x80 != 0;
                 self.ppu_regs.inidisp = value;
+                if was_blanked && value & 0x80 == 0 && self.ppu.in_vblank() {
+                    self.oamadd = self.oamadd_latch;
+                    self.oam_high = false;
+                    self.refresh_first_sprite();
+                }
                 return Ok(());
             }
             // $2101: OBSEL
@@ -1911,10 +1956,14 @@ impl SystemBus {
                 self.ppu_regs.mosaic = value;
                 return Ok(());
             }
-            // $2133 SETINI: screen-mode select (EXTBG bit 6 is consumed by
-            // the mode-7 renderer; the rest is stored for fidelity).
+            // $2133 SETINI: screen-mode select. EXTBG (bit 6) and
+            // pseudo-hires (bit 3) are consumed by the renderer; bit 2
+            // (overscan) moves the vblank boundary -- and with it the
+            // NMI, HVBJOY, auto-joypad and OAM-reload edges -- to line
+            // 239.
             if offset == 0x2133 {
                 self.ppu_regs.setini = value;
+                self.ppu.set_overscan(value & 0x04 != 0);
                 return Ok(());
             }
             // $211A M7SEL: mode-7 screen-over / flip control.
@@ -3195,15 +3244,18 @@ mod tests {
 
     #[test]
     fn joyser1_reads_zero_before_any_strobe_regardless_of_controller_state() {
-        // Un-strobed $4017 reads must stay at the deliberately safe 0 --
-        // an always-1 ("pulled high"/no controller) stub was tried and
-        // caused a real boot-time regression in the real ROM (see the
-        // comment on the $4017 read handler in read_bus). The same
-        // `ever_strobed` guard that protects $4016 applies here.
+        // Un-strobed $4017 reads must keep the serial DATA bit (bit 0) at
+        // the deliberately safe 0 -- an always-1 ("pulled high"/no
+        // controller) stub was tried and caused a real boot-time
+        // regression in the real ROM (see the $4017 read handler). The
+        // hardwired bits 4-2 (always 1 on port 2) and the open-bus high
+        // bits are real hardware behavior and stay.
         let mut bus = SystemBus::new();
         bus.set_joypad1_state(0xFFFF);
         bus.set_joypad2_state(0xFFFF);
-        assert_eq!(bus.read_u8(0x004017).unwrap(), 0x00);
+        let value = bus.read_u8(0x004017).unwrap();
+        assert_eq!(value & 0x03, 0x00, "the un-strobed data bits must read 0");
+        assert_eq!(value & 0x1C, 0x1C, "port 2 hardwires bits 4-2 high");
     }
 
     #[test]
@@ -3898,6 +3950,124 @@ mod tests {
         let hi = bus.read_u8(0x002136).unwrap() as u32;
         let result = (((lo | (mid << 8) | (hi << 16)) << 8) as i32) >> 8;
         assert_eq!(result, -6, "MPY must refresh from the M7A write: -2 * 3 = -6");
+    }
+
+    #[test]
+    fn rdnmi_flag_expires_at_the_end_of_vblank_even_if_never_read() {
+        // Hardware clears RDNMI's bit 7 at the end of the blanking period
+        // whether or not the game read $4210 (snes9x resets FillRAM[$4210]
+        // at the V-counter wrap). A poll outside vblank must see 0.
+        let mut bus = SystemBus::new();
+        bus.tick_master(230 * 341 * 4); // into vblank; the entry edge set the flag
+        bus.tick_master(33 * 341 * 4); // cross the frame wrap into the next frame's line 1
+        assert_eq!(
+            bus.read_u8(0x004210).unwrap() & 0x80,
+            0,
+            "the vblank flag must not survive past the end of vblank"
+        );
+    }
+
+    #[test]
+    fn forced_blank_off_during_vblank_reloads_the_oam_address() {
+        // The vblank-entry OAM-address reload is skipped in forced blank;
+        // turning forced blank OFF while still inside vblank performs the
+        // reload right then (snes9x's $2100 handler).
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x8F).unwrap(); // forced blank ON
+        bus.write_u8(0x002102, 0x00).unwrap();
+        bus.write_u8(0x002103, 0x00).unwrap();
+        bus.write_u8(0x002104, 0x11).unwrap(); // consume word 0
+        bus.write_u8(0x002104, 0x22).unwrap();
+
+        tick_dots(&mut bus, 230 * 341); // vblank entry happened while blanked: no reload
+        bus.write_u8(0x002100, 0x0F).unwrap(); // un-blank DURING vblank -> reload now
+
+        bus.write_u8(0x002104, 0xAA).unwrap();
+        bus.write_u8(0x002104, 0xBB).unwrap();
+        assert_eq!(bus.ppu_ref().oam_ref().read(0), 0xAA, "the un-blank write must have reloaded OAMADD to the latch");
+        assert_eq!(bus.ppu_ref().oam_ref().read(1), 0xBB);
+    }
+
+    #[test]
+    fn hdma_on_the_same_channel_kills_an_in_flight_dma() {
+        // snes9x dma.cpp: "If HDMA triggers in the middle of DMA transfer
+        // and it uses the same channel, it kills the DMA transfer
+        // immediately. $43x2 and $43x5 stop updating." A different
+        // channel's DMA must be unaffected.
+        let build = |dma_channel: u8| -> SystemBus {
+            let mut bus = SystemBus::new();
+            // HDMA channel 0: an effectively endless repeat entry so the
+            // channel stays active on every line of the frame.
+            bus.write_u8(0x7E6000, 0xFF).unwrap(); // repeat, 127 lines
+            bus.write_u8(0x004300, 0x00).unwrap(); // direct, mode 0
+            bus.write_u8(0x004301, 0x22).unwrap(); // -> $2122 (CGRAM), away from the DMA's target
+            bus.write_u8(0x004302, 0x00).unwrap();
+            bus.write_u8(0x004303, 0x60).unwrap();
+            bus.write_u8(0x004304, 0x7E).unwrap();
+            tick_dots(&mut bus, 230 * 341); // into vblank, then arm
+            bus.write_u8(0x00420C, 0x01).unwrap();
+            tick_dots(&mut bus, 32 * 341); // init + pre-visible line; now at scanline 0, dot 0
+
+            // General DMA on `dma_channel`: 1000 bytes into $2118. At 8
+            // master cycles/byte it reaches scanline 0's HDMA slot
+            // (~dot 276) after ~135 bytes.
+            let base = 0x004300 + (dma_channel as u32) * 0x10;
+            bus.write_u8(base, 0x08).unwrap(); // fixed source, mode 0
+            bus.write_u8(base + 1, 0x18).unwrap();
+            bus.write_u8(base + 2, 0x10).unwrap();
+            bus.write_u8(base + 3, 0x00).unwrap();
+            bus.write_u8(base + 4, 0x7E).unwrap();
+            bus.write_u8(base + 5, 0xE8).unwrap(); // DAS = 1000
+            bus.write_u8(base + 6, 0x03).unwrap();
+            bus.write_u8(0x00420B, 1 << dma_channel).unwrap();
+            bus
+        };
+
+        // Same channel: the mid-transfer HDMA kills the DMA -- DAS holds
+        // the untransferred remainder instead of draining to 0.
+        let mut bus = build(0);
+        let das = (bus.read_u8(0x004305).unwrap() as u16)
+            | ((bus.read_u8(0x004306).unwrap() as u16) << 8);
+        assert!(
+            das > 0 && das < 1000,
+            "the same-channel HDMA must abort the DMA mid-transfer (DAS = {das}, expected 0 < DAS < 1000)"
+        );
+
+        // Different channel: the DMA runs to completion.
+        let mut bus = build(1);
+        let das1 = (bus.read_u8(0x004315).unwrap() as u16)
+            | ((bus.read_u8(0x004316).unwrap() as u16) << 8);
+        assert_eq!(das1, 0, "an HDMA on channel 0 must not kill a DMA on channel 1");
+    }
+
+    #[test]
+    fn vram_writes_are_blocked_during_active_display() {
+        // The PPU owns VRAM while drawing: data-port writes only land
+        // during vblank or forced blank (snes9x BlockInvalidVRAMAccess /
+        // CHECK_INBLANK); blocked writes don't advance VMADD either.
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x0F).unwrap(); // screen ON, scanline 0 = active display
+        bus.write_u8(0x002116, 0x00).unwrap();
+        bus.write_u8(0x002117, 0x00).unwrap();
+        bus.write_u8(0x002118, 0xAA).unwrap(); // active display: dropped
+        assert_eq!(bus.ppu_ref().vram_ref().read(0), 0x00, "active-display VRAM writes must be dropped");
+
+        tick_dots(&mut bus, 230 * 341); // into vblank
+        bus.write_u8(0x002118, 0xBB).unwrap(); // now it lands -- at word 0 (no phantom increment)
+        assert_eq!(bus.ppu_ref().vram_ref().read(0), 0xBB, "vblank writes land at the unmoved address");
+    }
+
+    #[test]
+    fn overscan_moves_vblank_and_the_nmi_to_line_239() {
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002133, 0x04).unwrap(); // SETINI overscan
+        bus.write_u8(0x004200, 0x80).unwrap(); // NMI enable
+        bus.tick_master(230 * 341 * 4); // line 230: visible in overscan mode
+        assert_eq!(bus.read_u8(0x004212).unwrap() & 0x80, 0, "line 230 is not vblank with overscan on");
+        assert!(!bus.take_pending_nmi(), "no NMI before line 239 in overscan mode");
+        bus.tick_master(10 * 341 * 4); // line 240
+        assert_eq!(bus.read_u8(0x004212).unwrap() & 0x80, 0x80, "vblank starts at line 239 with overscan");
+        assert!(bus.take_pending_nmi(), "the NMI fires at the overscan vblank boundary");
     }
 
     #[test]

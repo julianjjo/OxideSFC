@@ -169,11 +169,14 @@ fn render_band(
     }
     render_layers(&mut scratch.main, &mut scratch.main_layer, regs.tm, regs.tmw, vram, cgram, oam, regs, &sprite_eval, y0, y1);
 
-    // Subscreen: only needed when color math blends with it (CGWSEL bit 1);
-    // otherwise the fixed COLDATA color is the second operand. TSW is the
-    // subscreen's window-mask selector.
+    // Subscreen: needed when color math blends with it (CGWSEL bit 1) --
+    // otherwise the fixed COLDATA color is the second operand -- and in
+    // pseudo-hires mode (SETINI bit 3), where hardware interleaves
+    // subscreen pixels on the even half-dots. TSW is the subscreen's
+    // window-mask selector.
+    let pseudo_hires = regs.setini & 0x08 != 0 && (regs.bgmode & 0x07) < 5;
     let use_subscreen = regs.cgwsel & 0x02 != 0;
-    if use_subscreen {
+    if use_subscreen || pseudo_hires {
         for i in y0 * SCREEN_WIDTH..y1 * SCREEN_WIDTH {
             scratch.sub[i] = backdrop;
             scratch.sub_layer[i] = LAYER_BACKDROP;
@@ -221,6 +224,13 @@ fn render_band(
         if math_allowed && math_enable & (1 << scratch.main_layer[i]) != 0 {
             let operand = if use_subscreen { scratch.sub[i] } else { fixed };
             color = color_math(main_color, operand, subtract, half);
+        }
+        // Pseudo-hires (SETINI bit 3): hardware outputs the subscreen on
+        // even half-dots and the main screen on odd ones -- on this fixed
+        // 256-wide raster that collapses to averaging the two, the same
+        // way the true hi-res modes collapse their dot pairs.
+        if pseudo_hires {
+            color = average_bgr555(&[color, scratch.sub[i]]);
         }
 
         let (mut r, mut g, mut b) = bgr555_to_rgb8(color);
@@ -2062,6 +2072,52 @@ mod tests {
         let fb = render_frame(&vram, &cgram, &oam, &regs);
         let sprite1_color = bgr555_to_rgb8(cgram.read_color(145));
         assert_eq!((fb[idx], fb[idx + 1], fb[idx + 2]), sprite1_color, "FirstSprite 1: sprite 1 now has the highest priority");
+    }
+
+    #[test]
+    fn pseudo_hires_averages_main_and_subscreen_pixels() {
+        // SETINI bit 3 (pseudo-hires): hardware interleaves subscreen
+        // pixels on even half-dots and main-screen pixels on odd ones; on
+        // this fixed 256-wide raster that collapses to averaging the two
+        // (the same collapse the true hi-res modes use).
+        let mut vram = Vram::new();
+        let mut cgram = Cgram::new();
+
+        // 4bpp tile 1: solid pixel value 1.
+        for row in 0..8u16 {
+            vram.write(32 + row * 2, 0xFF);
+        }
+        // BG1 tilemap at word 0x400: tile 1, palette 0 -> color 1 (red).
+        vram.write(0x800, 0x01);
+        vram.write(0x801, 0x00);
+        // BG2 tilemap at word 0x800: tile 1, palette 1 -> color 17 (blue).
+        vram.write(0x1000, 0x01);
+        vram.write(0x1001, 0x04);
+
+        cgram.write(1 * 2, 0x1F); // color 1 = pure red (BGR555 0x001F)
+        cgram.write(1 * 2 + 1, 0x00);
+        cgram.write(17 * 2, 0x00); // color 17 = pure blue (BGR555 0x7C00)
+        cgram.write(17 * 2 + 1, 0x7C);
+
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F;
+        regs.bgmode = 1;
+        regs.bg_sc[0] = 0x04; // BG1 map at word 0x400
+        regs.bg_sc[1] = 0x08; // BG2 map at word 0x800
+        regs.tm = 0x01; // main screen: BG1 (red)
+        regs.ts = 0x02; // subscreen: BG2 (blue)
+        regs.setini = 0x08; // pseudo-hires
+
+        let fb = render_frame(&vram, &cgram, &oam_empty(), &regs);
+        // avg(red 0x001F, blue 0x7C00) = r 15, g 0, b 15 = 0x3C0F.
+        let expected = bgr555_to_rgb8(0x3C0F);
+        assert_eq!((fb[0], fb[1], fb[2]), expected, "pseudo-hires must blend main and subscreen");
+
+        // Without the bit, only the main screen shows.
+        regs.setini = 0x00;
+        let fb = render_frame(&vram, &cgram, &oam_empty(), &regs);
+        let expected = bgr555_to_rgb8(0x001F);
+        assert_eq!((fb[0], fb[1], fb[2]), expected, "without SETINI bit 3 the subscreen stays hidden");
     }
 
     #[test]
