@@ -1,8 +1,19 @@
 import { useState, useEffect, useCallback, type RefObject } from 'react';
-import { save } from '@tauri-apps/plugin-dialog';
-import { writeFile } from '@tauri-apps/plugin-fs';
 import { useEmulationStore } from '../../stores/emulationStore';
 import { Button } from '../common/Button';
+import { captureScreenshot } from './captureScreenshot';
+import {
+  IconPlay,
+  IconPause,
+  IconSave,
+  IconLoad,
+  IconCamera,
+  IconGear,
+  IconHome,
+  IconLayers,
+  IconFolderOpen,
+  IconX,
+} from './icons';
 
 interface QuickMenuProps {
   isOpen: boolean;
@@ -33,7 +44,6 @@ export function QuickMenu({
     resume,
     saveState,
     loadState,
-    stop
   } = useEmulationStore();
 
   const [showSaveSlots, setShowSaveSlots] = useState(false);
@@ -130,11 +140,8 @@ export function QuickMenu({
     }
   };
 
-  // Captures the emulator's WebGL <canvas> client-side (there is no backend
-  // `take_screenshot` command -- see WebGLRenderer.ts's `preserveDrawingBuffer:
-  // true`, which keeps the drawing buffer intact so this capture isn't
-  // blank) and writes it to disk via the same dialog+fs plugins used
-  // elsewhere in this app (see FileSystemService.ts).
+  // Screenshot capture lives in captureScreenshot.ts, shared with the
+  // control deck's button and the F8 gameplay hotkey (see EmulatorView).
   const handleScreenshot = async () => {
     const canvas = canvasRef?.current;
     if (!canvas) {
@@ -145,34 +152,11 @@ export function QuickMenu({
     }
 
     try {
-      const blob = await new Promise<Blob | null>((resolve) => {
-        canvas.toBlob(resolve, 'image/png');
-      });
-
-      if (!blob) {
-        throw new Error('canvas.toBlob returned no data');
+      const result = await captureScreenshot(canvas, gameTitle);
+      if (result === 'saved') {
+        setScreenshotPath('saved');
+        setTimeout(() => setScreenshotPath(null), 3000);
       }
-
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const safeTitle = (gameTitle || 'screenshot').replace(/[\\/:*?"<>|]/g, '_');
-      const defaultPath = `${safeTitle}_${timestamp}.png`;
-
-      const destination = await save({
-        title: 'Save Screenshot',
-        defaultPath,
-        filters: [{ name: 'PNG Image', extensions: ['png'] }],
-      });
-
-      if (!destination) {
-        // User cancelled the dialog.
-        return;
-      }
-
-      const buffer = new Uint8Array(await blob.arrayBuffer());
-      await writeFile(destination, buffer);
-
-      setScreenshotPath(destination);
-      setTimeout(() => setScreenshotPath(null), 3000);
     } catch (error) {
       console.error('Failed to take screenshot:', error);
       setSaveStatus('Screenshot failed!');
@@ -180,13 +164,10 @@ export function QuickMenu({
     }
   };
 
-  const handleExitToMenu = async () => {
-    try {
-      await stop();
-      onExitToMenu();
-    } catch (error) {
-      console.error('Failed to stop emulation:', error);
-    }
+  // The parent owns the full exit sequence (leave fullscreen, stop the
+  // emulation, navigate back) -- see EmulatorView's handleStop.
+  const handleExitToMenu = () => {
+    onExitToMenu();
   };
 
   if (!isOpen) return null;
@@ -218,7 +199,8 @@ export function QuickMenu({
           setShowLoadSlots(false);
         }} />
         
-        <div className={`relative rounded-lg p-6 max-w-sm w-full mx-4 ${containerClass}`}>
+        <div className={`relative overflow-hidden rounded-xl p-6 max-w-sm w-full mx-4 ${containerClass}`}>
+          <div className="sfc-pinstripe absolute top-0 inset-x-0 h-[3px]" aria-hidden />
           <h2 className={`text-xl font-semibold mb-4 ${textClass}`}>
             {showSaveSlots ? 'Save State' : 'Load State'}
           </h2>
@@ -260,15 +242,23 @@ export function QuickMenu({
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       
       {/* Menu container */}
-      <div className={`relative rounded-lg p-6 max-w-md w-full mx-4 ${containerClass}`}>
+      <div className={`relative overflow-hidden rounded-xl p-6 max-w-md w-full mx-4 ${containerClass}`}>
+        <div className="sfc-pinstripe absolute top-0 inset-x-0 h-[3px]" aria-hidden />
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
-          <h1 className={`text-2xl font-bold ${textClass}`}>Quick Menu</h1>
+          <div className="min-w-0">
+            <h1 className={`text-2xl font-bold ${textClass}`}>Quick Menu</h1>
+            {gameTitle && (
+              <p className={`text-xs truncate ${mutedClass}`}>{gameTitle}</p>
+            )}
+          </div>
           <button
             onClick={onClose}
-            className={`p-2 rounded-lg ${buttonClass}`}
+            className={`p-2 rounded-lg ${buttonClass} ${mutedClass}`}
+            aria-label="Close menu"
+            title="Close (Esc)"
           >
-            ✕
+            <IconX />
           </button>
         </div>
 
@@ -297,8 +287,11 @@ export function QuickMenu({
             onClick={handleTogglePause}
             className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
           >
-            <span className="text-2xl">{isPaused ? '▶️' : '⏸️'}</span>
+            <span style={{ color: 'var(--sfc-blue)' }}>
+              {isPaused ? <IconPlay size={22} /> : <IconPause size={22} />}
+            </span>
             <span className={textClass}>{isPaused ? 'Resume' : 'Pause'}</span>
+            <span className={`text-xs ${mutedClass}`}>P</span>
           </button>
 
           {/* Quick Save */}
@@ -306,7 +299,9 @@ export function QuickMenu({
             onClick={handleQuickSave}
             className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
           >
-            <span className="text-2xl">💾</span>
+            <span style={{ color: 'var(--sfc-green)' }}>
+              <IconSave size={22} />
+            </span>
             <span className={textClass}>Quick Save</span>
             <span className={`text-xs ${mutedClass}`}>F5</span>
           </button>
@@ -316,7 +311,9 @@ export function QuickMenu({
             onClick={handleQuickLoad}
             className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
           >
-            <span className="text-2xl">📂</span>
+            <span style={{ color: 'var(--sfc-yellow)' }}>
+              <IconLoad size={22} />
+            </span>
             <span className={textClass}>Quick Load</span>
             <span className={`text-xs ${mutedClass}`}>F9</span>
           </button>
@@ -324,27 +321,27 @@ export function QuickMenu({
           {/* Save to Slot */}
           <button
             onClick={() => setShowSaveSlots(true)}
-            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
+            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass} ${mutedClass}`}
           >
-            <span className="text-2xl">📋</span>
+            <IconLayers size={22} />
             <span className={textClass}>Save Slot</span>
           </button>
 
           {/* Load from Slot */}
           <button
             onClick={() => setShowLoadSlots(true)}
-            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
+            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass} ${mutedClass}`}
           >
-            <span className="text-2xl">📁</span>
+            <IconFolderOpen size={22} />
             <span className={textClass}>Load Slot</span>
           </button>
 
           {/* Screenshot */}
           <button
             onClick={handleScreenshot}
-            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
+            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass} ${mutedClass}`}
           >
-            <span className="text-2xl">📸</span>
+            <IconCamera size={22} />
             <span className={textClass}>Screenshot</span>
             <span className={`text-xs ${mutedClass}`}>F8</span>
           </button>
@@ -355,9 +352,9 @@ export function QuickMenu({
               onClose();
               onOpenSettings();
             }}
-            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass}`}
+            className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass} ${mutedClass}`}
           >
-            <span className="text-2xl">⚙️</span>
+            <IconGear size={22} />
             <span className={textClass}>Settings</span>
           </button>
 
@@ -366,7 +363,9 @@ export function QuickMenu({
             onClick={handleExitToMenu}
             className={`p-4 rounded-lg flex flex-col items-center gap-2 ${buttonClass} col-span-2`}
           >
-            <span className="text-2xl">🏠</span>
+            <span style={{ color: 'var(--sfc-red)' }}>
+              <IconHome size={22} />
+            </span>
             <span className={textClass}>Exit to Menu</span>
           </button>
         </div>

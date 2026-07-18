@@ -55,9 +55,15 @@ function App() {
   // Apply theme
   const theme = settings.general.theme || 'dark';
 
+  // The emulator view is chromeless: the game gets the entire window and all
+  // controls live in its own auto-hiding control deck (exit/settings included),
+  // so the global header only renders outside of gameplay.
+  const inEmulator = currentView === 'emulator';
+
   return (
     <div className={`h-screen flex flex-col ${theme === 'light' ? 'bg-gray-100' : 'bg-slate-900'}`}>
       {/* Header / Navigation */}
+      {!inEmulator && (
       <header className={`flex items-center justify-between px-4 py-3 ${theme === 'light' ? 'bg-white border-b border-gray-200' : 'bg-slate-800 border-b border-slate-700'}`}>
         <div className="flex items-center gap-6">
           <h1 className="text-xl font-bold text-primary-500">OxideSFC</h1>
@@ -98,12 +104,18 @@ function App() {
           </button>
         )}
       </header>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
         {currentView === 'library' && <Library onPlayGame={() => setCurrentView('emulator')} />}
         {currentView === 'settings' && <Settings onRelaunchWizard={handleRelaunchWizard} />}
-        {currentView === 'emulator' && <EmulatorView onExit={() => setCurrentView('library')} />}
+        {currentView === 'emulator' && (
+          <EmulatorView
+            onExit={() => setCurrentView('library')}
+            onOpenSettings={() => setCurrentView('settings')}
+          />
+        )}
       </main>
 
       <WelcomeWizard

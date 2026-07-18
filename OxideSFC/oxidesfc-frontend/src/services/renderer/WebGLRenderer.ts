@@ -34,8 +34,6 @@ export class WebGLRenderer {
   
   // State
   private isInitialized: boolean = false;
-  private currentWidth: number = 0;
-  private currentHeight: number = 0;
   private options: RenderOptions;
 
   // Bound event handlers (stored so dispose() can remove the exact same
@@ -152,12 +150,8 @@ export class WebGLRenderer {
     // createResources() already re-selects the shader that matches
     // this.options (via resolveShaderType), so the user's chosen CRT/xBRZ/
     // HQ2x filter survives a context loss instead of reverting to
-    // passthrough. We still need to restore the canvas's pixel dimensions,
-    // since losing the context doesn't reset currentWidth/currentHeight but
-    // a fresh context starts with a 0x0-ish canvas until the next render.
-    if (this.currentWidth > 0 && this.currentHeight > 0) {
-      this.updateCanvasSize(this.currentWidth, this.currentHeight);
-    }
+    // passthrough. Canvas pixel dimensions are owned by the view (see
+    // EmulatorView's ResizeObserver) and survive a context loss untouched.
 
     this.contextLost = false;
   }
@@ -267,8 +261,14 @@ export class WebGLRenderer {
     const gl = this.gl;
     const startTime = performance.now();
 
-    // Update canvas size if needed
-    this.updateCanvasSize(width, height);
+    // NOTE: the canvas's drawing-buffer size (canvas.width/height) is owned
+    // by the view layer (EmulatorView sizes it from a ResizeObserver +
+    // devicePixelRatio, letterboxed to the frame's aspect ratio). Driving it
+    // from here based on parentElement measurements caused a layout feedback
+    // loop: the buffer's intrinsic size participates in flex layout
+    // (min-height:auto), which grew the container the next measurement read
+    // from, pushing the UI bars off-screen until a window resize forced a
+    // clean re-layout.
 
     // Upload frame data to texture
     this.uploadTexture(frameData, width, height);
@@ -316,45 +316,6 @@ export class WebGLRenderer {
 
     // Update performance stats
     this.updateStats(startTime);
-  }
-
-  /**
-   * Update canvas size based on frame dimensions and container
-   */
-  private updateCanvasSize(frameWidth: number, frameHeight: number): void {
-    const container = this.canvas.parentElement;
-    if (!container) return;
-
-    const containerWidth = container.clientWidth;
-    const containerHeight = container.clientHeight;
-
-    // Guard against a container that hasn't been laid out yet (e.g. this
-    // runs right after mount, before the container has a real height).
-    // Dividing by a zero height/width below would produce Infinity/NaN and
-    // collapse the canvas to 0 width. Skip this call; it'll naturally be
-    // called again on the next real resize/frame once layout has settled.
-    if (containerWidth === 0 || containerHeight === 0) {
-      return;
-    }
-
-    // Calculate size maintaining aspect ratio
-    const aspectRatio = frameWidth / frameHeight;
-    let targetWidth = containerWidth;
-    let targetHeight = containerHeight;
-
-    if (containerWidth / containerHeight > aspectRatio) {
-      targetWidth = containerHeight * aspectRatio;
-    } else {
-      targetHeight = containerWidth / aspectRatio;
-    }
-
-    // Only update if size changed
-    if (this.canvas.width !== targetWidth || this.canvas.height !== targetHeight) {
-      this.canvas.width = Math.floor(targetWidth);
-      this.canvas.height = Math.floor(targetHeight);
-      this.currentWidth = frameWidth;
-      this.currentHeight = frameHeight;
-    }
   }
 
   /**

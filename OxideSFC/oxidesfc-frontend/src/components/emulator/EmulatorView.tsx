@@ -1,25 +1,33 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEmulationStore } from '../../stores/emulationStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { WebGLRenderer } from '../../services/renderer';
 import { getAudioService } from '../../services/audio';
 import { useGamepad } from '../../hooks/useGamepad';
 import { QuickMenu } from './QuickMenu';
+import { ControlDeck } from './ControlDeck';
+import { captureScreenshot } from './captureScreenshot';
 
 interface EmulatorViewProps {
   onExit: () => void;
+  onOpenSettings: () => void;
 }
 
-export function EmulatorView({ onExit }: EmulatorViewProps) {
+/** Idle time (no mouse activity) before the control deck hides during play. */
+const CONTROLS_HIDE_DELAY_MS = 2500;
+
+export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
+  const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WebGLRenderer | null>(null);
   const animationRef = useRef<number | null>(null);
   const initializedRef = useRef(false);
   const audioServiceRef = useRef<ReturnType<typeof getAudioService> | null>(null);
-  
+
   const { settings } = useSettingsStore();
-  const { 
+  const {
     isRunning,
     isPaused,
     currentGame,
@@ -29,12 +37,15 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
     stop,
     getFrame,
     setInput,
+    saveState,
+    loadState,
   } = useEmulationStore();
-  
+
   const theme = settings.general?.theme || 'dark';
   const [showMenu, setShowMenu] = useState(false);
   const [webglStatus, setWebglStatus] = useState<string>('');
   const [audioStatus, setAudioStatus] = useState<string>('');
+  const [isFullscreen, setIsFullscreen] = useState(false);
   // Emulation speed multiplier (1.00 = real NTSC speed). Applied on the
   // backend (wall-clock frame pacing) AND to the audio service's playback
   // rate, so pitch/tempo follow the game speed like a real console would.
@@ -61,6 +72,143 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
       })
       .catch(() => {});
   }, []);
+
+  // -------------------------------------------------------------------------
+  // Canvas sizing
+  //
+  // The canvas is absolutely positioned inside the full-bleed stage and sized
+  // entirely from here: letterboxed to the current frame's aspect ratio via a
+  // ResizeObserver on the stage, with the drawing buffer scaled by
+  // devicePixelRatio for crisp output on scaled displays. The renderer never
+  // touches canvas.width/height (it used to derive them from parentElement
+  // inside the render loop, which fed the buffer's intrinsic size back into
+  // flex layout and pushed the UI off-screen until a window resize forced a
+  // clean re-layout -- the "game is cut off until I resize" bug).
+  // -------------------------------------------------------------------------
+  const frameSizeRef = useRef({ width: 256, height: 224 });
+
+  const layoutCanvas = useCallback(() => {
+    const stage = stageRef.current;
+    const canvas = canvasRef.current;
+    if (!stage || !canvas) return;
+
+    const stageWidth = stage.clientWidth;
+    const stageHeight = stage.clientHeight;
+    if (stageWidth === 0 || stageHeight === 0) return;
+
+    const { width: frameWidth, height: frameHeight } = frameSizeRef.current;
+    const aspect = frameWidth / frameHeight;
+
+    let cssWidth = stageWidth;
+    let cssHeight = stageHeight;
+    if (stageWidth / stageHeight > aspect) {
+      cssWidth = stageHeight * aspect;
+    } else {
+      cssHeight = stageWidth / aspect;
+    }
+    cssWidth = Math.floor(cssWidth);
+    cssHeight = Math.floor(cssHeight);
+
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+    canvas.style.left = `${Math.floor((stageWidth - cssWidth) / 2)}px`;
+    canvas.style.top = `${Math.floor((stageHeight - cssHeight) / 2)}px`;
+
+    const dpr = window.devicePixelRatio || 1;
+    const bufferWidth = Math.max(1, Math.round(cssWidth * dpr));
+    const bufferHeight = Math.max(1, Math.round(cssHeight * dpr));
+    if (canvas.width !== bufferWidth || canvas.height !== bufferHeight) {
+      canvas.width = bufferWidth;
+      canvas.height = bufferHeight;
+    }
+  }, []);
+
+  useEffect(() => {
+    layoutCanvas();
+    const stage = stageRef.current;
+    if (!stage) return;
+    const observer = new ResizeObserver(() => layoutCanvas());
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [layoutCanvas]);
+
+  // -------------------------------------------------------------------------
+  // Transient feedback (toast) for save/load/screenshot actions
+  // -------------------------------------------------------------------------
+  const [toast, setToast] = useState<{ id: number; text: string; tone: 'ok' | 'err' } | null>(null);
+  const toastIdRef = useRef(0);
+
+  const showToast = useCallback((text: string, tone: 'ok' | 'err' = 'ok') => {
+    const id = ++toastIdRef.current;
+    setToast({ id, text, tone });
+    window.setTimeout(() => {
+      setToast((current) => (current && current.id === id ? null : current));
+    }, 2200);
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Control deck auto-hide
+  //
+  // The deck (and the pointer) hides after a short idle period while the game
+  // is actually playing; any mouse activity, pausing, opening the menu, or
+  // keyboard focus inside the deck brings it back / keeps it up.
+  // -------------------------------------------------------------------------
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const hideTimerRef = useRef<number | null>(null);
+  // Live mirror of the state the hide-timer callback needs, so the timeout
+  // never acts on a stale closure.
+  const uiStateRef = useRef({ isRunning, isPaused, showMenu, deckActive: false });
+  uiStateRef.current.isRunning = isRunning;
+  uiStateRef.current.isPaused = isPaused;
+  uiStateRef.current.showMenu = showMenu;
+
+  const clearHideTimer = useCallback(() => {
+    if (hideTimerRef.current !== null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleHide = useCallback(() => {
+    clearHideTimer();
+    hideTimerRef.current = window.setTimeout(() => {
+      const s = uiStateRef.current;
+      if (s.isRunning && !s.isPaused && !s.showMenu && !s.deckActive) {
+        setControlsVisible(false);
+      }
+    }, CONTROLS_HIDE_DELAY_MS);
+  }, [clearHideTimer]);
+
+  const showControls = useCallback(() => {
+    setControlsVisible(true);
+    scheduleHide();
+  }, [scheduleHide]);
+
+  // Pin the controls whenever play is interrupted; restart the idle timer
+  // when gameplay resumes.
+  useEffect(() => {
+    if (!isRunning || isPaused || showMenu) {
+      clearHideTimer();
+      setControlsVisible(true);
+    } else {
+      scheduleHide();
+    }
+  }, [isRunning, isPaused, showMenu, clearHideTimer, scheduleHide]);
+
+  useEffect(() => clearHideTimer, [clearHideTimer]);
+
+  const handleDeckActive = useCallback(
+    (active: boolean) => {
+      uiStateRef.current.deckActive = active;
+      if (active) {
+        clearHideTimer();
+        setControlsVisible(true);
+      } else {
+        scheduleHide();
+      }
+    },
+    [clearHideTimer, scheduleHide]
+  );
 
   // Input mapping
   //
@@ -249,10 +397,10 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
       if (success) {
         rendererRef.current = renderer;
         initializedRef.current = true;
-        setWebglStatus(`WebGL: ${renderer.getWebGLVersion()}`);
+        setWebglStatus(renderer.getWebGLVersion());
         console.log('WebGL renderer initialized successfully');
       } else {
-        setWebglStatus('WebGL: Failed to initialize');
+        setWebglStatus('no WebGL');
         console.error('Failed to initialize WebGL renderer');
       }
     };
@@ -272,7 +420,7 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
   // Update renderer options when settings change
   useEffect(() => {
     if (!rendererRef.current) return;
-    
+
     rendererRef.current.setOptions({
       scaleMode: (settings.video?.scale_mode as 'nearest' | 'bilinear' | 'xbrz' | 'hq2x') || 'nearest',
       crtMode: settings.video?.shader === 'crt',
@@ -289,28 +437,28 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
         latency: settings.audio?.latency || 50,
         channels: 'stereo',
       });
-      
+
       const success = await audioService.initialize();
-      
+
       if (success) {
         // Set volume from settings
         const volume = settings.audio?.volume ?? 1.0;
         audioService.setVolume(volume * 100);
-        
+
         // Set mute if disabled
         if (settings.audio?.enabled === false) {
           audioService.setMuted(true);
         }
-        
+
         // Set audio source callback to fetch samples from emulation
         audioService.setAudioSource(async (_count: number) => {
           // This will be called by the audio service to get samples
           // We'll use the audioBuffer from the store instead
           return []; // Will be overridden by queueAudio in render loop
         });
-        
+
         audioServiceRef.current = audioService;
-        setAudioStatus(`Audio: ${audioService.getSampleRate()}Hz`);
+        setAudioStatus(`${(audioService.getSampleRate() / 1000).toFixed(0)} kHz`);
         console.log('AudioService initialized successfully');
         // Begin playback now. Audio init is async and usually completes
         // AFTER the render-loop effect has already run its one-shot
@@ -320,13 +468,13 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
         // emulator view only mounts to play) guarantees playback begins.
         audioService.start();
       } else {
-        setAudioStatus('Audio: Failed to initialize');
+        setAudioStatus('no audio');
         console.error('Failed to initialize AudioService');
       }
     };
-    
+
     initAudio();
-    
+
     return () => {
       if (audioServiceRef.current) {
         audioServiceRef.current.dispose();
@@ -424,6 +572,16 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
 
         // Render frame using WebGL
         if (rendererRef.current && latestFrame && latestFrame.data) {
+          // Re-letterbox if the console changed output resolution (e.g.
+          // switching into a hi-res or interlaced mode).
+          if (
+            latestFrame.width !== frameSizeRef.current.width ||
+            latestFrame.height !== frameSizeRef.current.height
+          ) {
+            frameSizeRef.current = { width: latestFrame.width, height: latestFrame.height };
+            layoutCanvas();
+          }
+
           // Convert frame data to Uint8Array if needed
           const data = latestFrame.data instanceof Uint8Array
             ? latestFrame.data
@@ -459,20 +617,129 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [isRunning, getFrame]);
+  }, [isRunning, getFrame, layoutCanvas]);
 
-  const handlePauseResume = async () => {
+  // -------------------------------------------------------------------------
+  // Deck / hotkey actions
+  // -------------------------------------------------------------------------
+  const handlePauseResume = useCallback(async () => {
     if (isPaused) {
       await resume();
     } else {
       await pause();
     }
-  };
+  }, [isPaused, pause, resume]);
 
-  const handleStop = async () => {
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      const appWindow = getCurrentWindow();
+      const next = !(await appWindow.isFullscreen());
+      await appWindow.setFullscreen(next);
+      setIsFullscreen(next);
+    } catch (error) {
+      console.error('Failed to toggle fullscreen:', error);
+    }
+  }, []);
+
+  // The window keeps its fullscreen state across view remounts (e.g. a trip
+  // to Settings and back), so sync rather than assuming windowed.
+  useEffect(() => {
+    getCurrentWindow()
+      .isFullscreen()
+      .then(setIsFullscreen)
+      .catch(() => {});
+  }, []);
+
+  const handleStop = useCallback(async () => {
+    // Leave fullscreen when returning to the library so the user isn't
+    // stranded in a chromeless window.
+    try {
+      const appWindow = getCurrentWindow();
+      if (await appWindow.isFullscreen()) {
+        await appWindow.setFullscreen(false);
+      }
+    } catch {
+      // Fullscreen state is cosmetic here; exiting the game matters more.
+    }
     await stop();
     onExit();
-  };
+  }, [stop, onExit]);
+
+  const handleQuickSave = useCallback(async () => {
+    try {
+      await saveState(0);
+      showToast('State saved to slot 1');
+    } catch {
+      showToast('Save failed', 'err');
+    }
+  }, [saveState, showToast]);
+
+  const handleQuickLoad = useCallback(async () => {
+    try {
+      await loadState(0);
+      showToast('State loaded from slot 1');
+    } catch {
+      showToast('Load failed', 'err');
+    }
+  }, [loadState, showToast]);
+
+  const handleScreenshot = useCallback(async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    try {
+      const result = await captureScreenshot(canvas, currentGame?.title);
+      if (result === 'saved') {
+        showToast('Screenshot saved');
+      }
+    } catch (error) {
+      console.error('Failed to take screenshot:', error);
+      showToast('Screenshot failed', 'err');
+    }
+  }, [currentGame?.title, showToast]);
+
+  // Global gameplay hotkeys. Keys the user has mapped to SNES buttons always
+  // win (so a custom mapping of Space to a game button disables the pause
+  // hotkey rather than fighting it), and the quick menu owns the keyboard
+  // while it is open (it has its own handler, including Escape-to-close).
+  useEffect(() => {
+    const onHotkey = (e: KeyboardEvent) => {
+      if (showMenu) return;
+      // Holding a key must not machine-gun the action (Space auto-repeat
+      // would toggle pause dozens of times per second).
+      if (e.repeat) return;
+      if (keyToButtonRef.current[e.code]) return;
+
+      switch (e.code) {
+        case 'Space':
+          e.preventDefault();
+          handlePauseResume();
+          break;
+        case 'Escape':
+          e.preventDefault();
+          setShowMenu(true);
+          break;
+        case 'F5':
+          e.preventDefault();
+          handleQuickSave();
+          break;
+        case 'F9':
+          e.preventDefault();
+          handleQuickLoad();
+          break;
+        case 'F8':
+          e.preventDefault();
+          handleScreenshot();
+          break;
+        case 'F11':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', onHotkey);
+    return () => window.removeEventListener('keydown', onHotkey);
+  }, [showMenu, handlePauseResume, handleQuickSave, handleQuickLoad, handleScreenshot, toggleFullscreen]);
 
   if (!currentGame) {
     return (
@@ -482,92 +749,66 @@ export function EmulatorView({ onExit }: EmulatorViewProps) {
     );
   }
 
+  const infoParts = [
+    frame ? `${frame.width}×${frame.height}` : 'no signal',
+    webglStatus,
+    audioStatus,
+  ].filter(Boolean);
+
   return (
-    <div className="h-full flex flex-col bg-black">
-      {/* Emulator Canvas */}
-      <div className="flex-1 flex items-center justify-center">
-        <canvas
-          ref={canvasRef}
-          className="emulator-canvas max-w-full max-h-full"
-          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-        />
+    <div
+      className={`relative h-full bg-black overflow-hidden select-none ${controlsVisible ? '' : 'emu-stage--idle'}`}
+      onMouseMove={showControls}
+      onMouseDown={showControls}
+    >
+      {/* Game stage: the canvas is letterboxed inside this full-bleed area
+          by layoutCanvas(); its buffer size never participates in layout. */}
+      <div
+        ref={stageRef}
+        className="absolute inset-0"
+        onDoubleClick={toggleFullscreen}
+      >
+        <canvas ref={canvasRef} className="emulator-canvas absolute" />
       </div>
 
-      {/* Status Bar */}
-      <div className={`flex items-center justify-between px-4 py-1 text-xs ${theme === 'light' ? 'bg-gray-100 text-gray-600' : 'bg-slate-900 text-gray-400'}`}>
-        <div className="flex items-center gap-4">
-          <span>{webglStatus}</span>
-          <span>{audioStatus}</span>
+      {/* Transient action feedback */}
+      {toast && (
+        <div className={`emu-toast ${toast.tone === 'err' ? 'emu-toast--err' : ''}`} role="status">
+          {toast.text}
         </div>
-        <span>{frame ? `${frame.width}x${frame.height}` : 'No signal'}</span>
-      </div>
+      )}
 
-      {/* Controls Bar */}
-      <div className={`flex items-center justify-between px-4 py-2 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-        <div className="flex items-center gap-4">
-          <span className="font-semibold">{currentGame.title}</span>
-          <span className="text-sm text-gray-400">
-            {isPaused ? 'PAUSED' : 'RUNNING'}
-          </span>
+      {/* Paused indicator (hidden while the quick menu is up) */}
+      {isPaused && !showMenu && (
+        <div className="emu-paused-chip">
+          Paused <span className="key-hint">· Space resumes</span>
         </div>
+      )}
 
-        {/* Speed control: -/+ in 0.05x steps, click the value to reset to
-            1.00x. Backend pacing and audio playback rate move together. */}
-        <div className="flex items-center gap-1 text-sm">
-          <span className="text-gray-400 mr-1">Speed</span>
-          <button
-            onClick={() => applySpeed(speed - 0.05)}
-            className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded"
-            title="Slower (-0.05x)"
-          >
-            −
-          </button>
-          <button
-            onClick={() => applySpeed(1.0)}
-            className={`px-2 py-1 rounded font-mono min-w-[4.5rem] text-center ${speed === 1.0 ? 'text-gray-300' : 'text-yellow-400'}`}
-            title="Reset to 1.00x"
-          >
-            {speed.toFixed(2)}x
-          </button>
-          <button
-            onClick={() => applySpeed(speed + 0.05)}
-            className="px-2 py-1 bg-slate-600 hover:bg-slate-500 rounded"
-            title="Faster (+0.05x)"
-          >
-            +
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handlePauseResume}
-            className="px-4 py-2 bg-primary-600 hover:bg-primary-700 rounded text-sm"
-          >
-            {isPaused ? 'Resume' : 'Pause'}
-          </button>
-          
-          <button
-            onClick={() => setShowMenu(!showMenu)}
-            className="px-4 py-2 bg-slate-600 hover:bg-slate-500 rounded text-sm"
-          >
-            Menu
-          </button>
-          
-          <button
-            onClick={handleStop}
-            className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded text-sm"
-          >
-            Exit
-          </button>
-        </div>
-      </div>
+      <ControlDeck
+        visible={controlsVisible}
+        gameTitle={currentGame.title}
+        isPaused={isPaused}
+        speed={speed}
+        info={infoParts.join(' · ')}
+        isFullscreen={isFullscreen}
+        onPauseResume={handlePauseResume}
+        onSpeedChange={applySpeed}
+        onQuickSave={handleQuickSave}
+        onQuickLoad={handleQuickLoad}
+        onScreenshot={handleScreenshot}
+        onMenu={() => setShowMenu(true)}
+        onFullscreen={toggleFullscreen}
+        onExit={handleStop}
+        onActiveChange={handleDeckActive}
+      />
 
       {/* Menu Overlay */}
       <QuickMenu
         isOpen={showMenu}
         onClose={() => setShowMenu(false)}
-        onOpenSettings={() => setShowMenu(false)}
-        onExitToMenu={onExit}
+        onOpenSettings={onOpenSettings}
+        onExitToMenu={handleStop}
         theme={theme === 'light' ? 'light' : 'dark'}
         canvasRef={canvasRef}
         gameTitle={currentGame.title}

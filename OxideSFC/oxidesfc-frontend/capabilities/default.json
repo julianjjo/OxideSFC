@@ -5,7 +5,11 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
     "dialog:default",
+    "fs:default",
+    "fs:allow-write-file",
     "mcp-bridge:default"
   ]
 }
