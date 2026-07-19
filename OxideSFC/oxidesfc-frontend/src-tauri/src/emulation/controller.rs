@@ -181,10 +181,10 @@ impl Snes {
 
     /// Translates the frontend's raw keyboard/gamepad bitmask (see
     /// `EmulatorView.tsx`'s `keyToButton` map: bit0=Up,1=Down,2=Left,
-    /// 3=Right,4=A,5=B,6=Start,7=Select,8=L,9=R) into the SNES's own
-    /// auto-joypad-read bit layout and forwards it to the bus, where it's
-    /// actually visible to the running game via $4016/$4218/$4219. `x`/`y`
-    /// duplicate the D-pad bits and are intentionally unused here.
+    /// 3=Right,4=A,5=B,6=Start,7=Select,8=L,9=R,10=X,11=Y) into the SNES's
+    /// own auto-joypad-read bit layout and forwards it to the bus, where
+    /// it's actually visible to the running game via $4016/$4218/$4219.
+    /// `x`/`y` duplicate the D-pad bits and are intentionally unused here.
     fn set_controller_input(&mut self, port: usize, buttons: u16, _x: i8, _y: i8) {
         if port > 1 {
             return; // the two standard controller ports are modeled
@@ -201,6 +201,8 @@ impl Snes {
         if buttons & 0x80 != 0 { snes_buttons |= 0x2000; } // Select
         if buttons & 0x100 != 0 { snes_buttons |= 0x0020; } // L
         if buttons & 0x200 != 0 { snes_buttons |= 0x0010; } // R
+        if buttons & 0x400 != 0 { snes_buttons |= 0x0040; } // X
+        if buttons & 0x800 != 0 { snes_buttons |= 0x4000; } // Y
 
         if port == 0 {
             self.bus.set_joypad1_state(snes_buttons);
@@ -977,6 +979,51 @@ mod real_rom_tests {
             0x10,
             "Start bit (d4 of $4219) must be set after EmulationController::set_input presses Start; \
              got {:#04X} -- if this is 0, set_controller_input regressed back to a no-op",
+            joy1h
+        );
+    }
+
+    #[test]
+    fn set_input_translates_x_and_y_buttons_to_their_hardware_bits() {
+        // Regression guard: `set_controller_input` translated Up/Down/Left/
+        // Right/A/B/Start/Select/L/R from the frontend's bitmask but had no
+        // arms at all for X (0x400) or Y (0x800), so those bits were
+        // silently dropped before reaching the bus -- any key (or gamepad
+        // button) bound to X/Y, e.g. DKC's grab/throw on Y, simply never
+        // registered. Confirms both bits now land on the real hardware
+        // positions ($4218 d6 for X, $4219 d6 for Y) per SystemBus's own
+        // bit-layout table.
+        use oxidesfc_core::MemoryBus;
+
+        let mut controller = EmulationController::new();
+        controller.load_rom(&rom_path_str()).expect("ROM must load");
+        controller.start(None).expect("must be able to start after loading");
+
+        {
+            let snes = controller.snes.as_mut().expect("snes must exist after load_rom");
+            snes.bus.write_u8(0x004200, 0x01).unwrap();
+        }
+        controller.set_input(InputState { buttons: 0x400 | 0x800, x: 0, y: 0 });
+
+        {
+            let snes = controller.snes.as_mut().unwrap();
+            snes.bus.tick_ppu(230 * 340 / 2);
+        }
+
+        let snes = controller.snes.as_mut().unwrap();
+        let joy1l = snes.bus.read_u8(0x004218).unwrap();
+        let joy1h = snes.bus.read_u8(0x004219).unwrap();
+
+        assert_eq!(
+            joy1l & 0x40,
+            0x40,
+            "X bit (d6 of $4218) must be set after set_input presses X; got {:#04X}",
+            joy1l
+        );
+        assert_eq!(
+            joy1h & 0x40,
+            0x40,
+            "Y bit (d6 of $4219) must be set after set_input presses Y; got {:#04X}",
             joy1h
         );
     }
