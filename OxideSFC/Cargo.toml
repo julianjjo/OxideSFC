@@ -11,3 +11,12 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# The emulation core must run at real-time speed even in dev builds: an
+# unoptimized core steps a video frame in ~20ms (measured with SMW under
+# `cargo tauri dev`), which can't sustain NTSC's 60fps -- audio is produced
+# in ~120-230ms bursts and stutters no matter how correct the playback
+# pipeline is. Optimizing just this leaf crate keeps the frontend crate
+# fast to rebuild and fully debuggable.
+[profile.dev.package.oxidesfc-core]
+opt-level = 3

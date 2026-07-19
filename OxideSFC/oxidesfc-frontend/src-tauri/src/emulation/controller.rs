@@ -171,6 +171,14 @@ impl Snes {
         out
     }
 
+    /// Discards any DSP samples still queued inside the APU. Used when the
+    /// emulated timeline is abandoned (stop) so a later start() doesn't
+    /// begin by playing leftover audio from the previous session.
+    /// (`load_snapshot` already clears this buffer itself on state load.)
+    fn clear_audio_buffer(&mut self) {
+        self.bus.apu_mut().sample_buffer.clear();
+    }
+
     /// Translates the frontend's raw keyboard/gamepad bitmask (see
     /// `EmulatorView.tsx`'s `keyToButton` map: bit0=Up,1=Down,2=Left,
     /// 3=Right,4=A,5=B,6=Start,7=Select,8=L,9=R) into the SNES's own
@@ -289,6 +297,18 @@ pub struct EmulationController {
     /// start/pause/resume so the first paced call steps exactly one frame
     /// instead of "catching up" across the gap.
     last_pace: Option<Instant>,
+    /// Bumped whenever `current_frame` is (or is about to be) replaced.
+    /// Together with `last_polled_serial` this lets `poll_frame()` tell a
+    /// high-refresh-rate caller "nothing new" instead of re-cloning and
+    /// re-base64-encoding an identical ~230KB frame: the frontend polls
+    /// once per requestAnimationFrame (a 240Hz monitor = 240 polls/sec)
+    /// while NTSC only produces ~60 new frames/sec, so without this ~3 of
+    /// every 4 polls did that full encode for nothing -- load that
+    /// competed with emulation stepping and audibly starved the audio
+    /// pipeline.
+    frame_serial: u64,
+    /// The value of `frame_serial` at the previous `poll_frame()` call.
+    last_polled_serial: u64,
 }
 
 impl EmulationController {
@@ -305,6 +325,8 @@ impl EmulationController {
             speed: 1.0,
             frame_debt: 0.0,
             last_pace: None,
+            frame_serial: 0,
+            last_polled_serial: 0,
         }
     }
 
@@ -475,6 +497,17 @@ impl EmulationController {
         self.session_start = Some(Instant::now());
         self.last_pace = None;
         self.frame_debt = 0.0;
+        // A previous run of this ROM may have left samples behind (stop()
+        // clears too, but a crash/restart path might not have gone through
+        // it) -- starting playback with stale audio is an audible blip.
+        self.audio_buffer.clear();
+        if let Some(ref mut snes) = self.snes {
+            snes.clear_audio_buffer();
+        }
+        // Force the first poll after start to deliver a frame (even the
+        // pre-first-step default one) so the view has something to render
+        // immediately, matching the old always-return behavior on mount.
+        self.frame_serial = self.frame_serial.wrapping_add(1);
         info!("Emulation started");
         Ok(())
     }
@@ -524,6 +557,13 @@ impl EmulationController {
         self.is_paused = false;
         self.flush_play_time();
         self.current_game_id = None;
+        // Discard queued audio on both levels (the controller's drain
+        // buffer and the APU's internal sample queue) so nothing from this
+        // session leaks into the next start() as a stale-audio blip.
+        self.audio_buffer.clear();
+        if let Some(ref mut snes) = self.snes {
+            snes.clear_audio_buffer();
+        }
         info!("Emulation stopped");
         Ok(())
     }
@@ -616,6 +656,7 @@ impl EmulationController {
             }
             if frames > 0 {
                 self.current_frame = snes.get_frame();
+                self.frame_serial = self.frame_serial.wrapping_add(1);
             }
         }
     }
@@ -624,10 +665,20 @@ impl EmulationController {
         self.current_frame.clone()
     }
 
+    /// Returns the current frame only if it changed since the previous
+    /// poll (`None` otherwise), so callers polling faster than the
+    /// emulated ~60fps -- the frontend polls at monitor refresh rate --
+    /// don't pay the frame clone + base64 encode for identical content.
+    pub fn poll_frame(&mut self) -> Option<VideoFrame> {
+        if self.frame_serial == self.last_polled_serial {
+            return None;
+        }
+        self.last_polled_serial = self.frame_serial;
+        Some(self.current_frame.clone())
+    }
+
     pub fn get_audio(&mut self) -> Vec<i16> {
-        let audio = self.audio_buffer.clone();
-        self.audio_buffer.clear();
-        audio
+        std::mem::take(&mut self.audio_buffer)
     }
 
     pub fn set_input(&mut self, input: InputState) {
@@ -678,7 +729,12 @@ impl EmulationController {
         if let Some(ref mut snes) = self.snes {
             snes.load_state(&state).map_err(|e| e.to_string())?;
         }
-        
+
+        // The timeline just jumped: samples drained before the load belong
+        // to the abandoned timeline and would play as a stale-audio blip.
+        // (The core's `load_snapshot` already cleared the APU's own queue.)
+        self.audio_buffer.clear();
+
         info!("State loaded from slot {}", slot);
         Ok(())
     }

@@ -434,7 +434,7 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
         // Match the SNES DSP output rate so samples play at the correct
         // pitch with matched produce/consume rates (see AudioService).
         sampleRate: 32000,
-        latency: settings.audio?.latency || 50,
+        latency: settings.audio?.latency || 60,
         channels: 'stereo',
       });
 
@@ -449,13 +449,6 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
         if (settings.audio?.enabled === false) {
           audioService.setMuted(true);
         }
-
-        // Set audio source callback to fetch samples from emulation
-        audioService.setAudioSource(async (_count: number) => {
-          // This will be called by the audio service to get samples
-          // We'll use the audioBuffer from the store instead
-          return []; // Will be overridden by queueAudio in render loop
-        });
 
         audioServiceRef.current = audioService;
         setAudioStatus(`${(audioService.getSampleRate() / 1000).toFixed(0)} kHz`);
@@ -476,8 +469,15 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
     initAudio();
 
     return () => {
+      // Stop playback but keep the singleton service (and its
+      // AudioContext) alive across mounts. Disposing here raced React 18
+      // StrictMode's double effect invocation: the first cleanup tore the
+      // service down while the second run's async initialize() was still
+      // mid-addModule, so the worklet node was constructed on a context
+      // with no registered processor. The next mount just reuses the
+      // already-initialized service.
       if (audioServiceRef.current) {
-        audioServiceRef.current.dispose();
+        audioServiceRef.current.stop();
         audioServiceRef.current = null;
       }
     };

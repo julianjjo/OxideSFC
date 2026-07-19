@@ -38,17 +38,34 @@ pub fn stop_emulation(state: State<AppState>) -> Result<(), String> {
     emulation.stop()
 }
 
+/// Advances the paced emulation, then returns the rendered frame -- or
+/// `None` when no new emulated frame completed since the previous call.
+/// The frontend polls at monitor refresh rate (which can be 144/240Hz)
+/// while NTSC produces ~60 frames/sec; returning `None` for the
+/// in-between polls skips a ~230KB clone + base64 encode per call, load
+/// that competed with emulation stepping and starved the audio pipeline.
 #[tauri::command]
-pub fn get_video_frame(state: State<AppState>) -> Result<VideoFrame, String> {
+pub fn get_video_frame(state: State<AppState>) -> Result<Option<VideoFrame>, String> {
     let mut emulation = state.emulation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     emulation.step_frame();
-    Ok(emulation.get_frame())
+    Ok(emulation.poll_frame())
 }
 
+/// Drains the buffered PCM as raw little-endian `i16` bytes (interleaved
+/// L0, R0, L1, R1, ...) through Tauri's binary IPC path. Returning
+/// `Vec<i16>` here would serialize every sample into a JSON number array
+/// (and re-parse it in JS) on every animation frame; `tauri::ipc::Response`
+/// hands the frontend an `ArrayBuffer` it can view as an `Int16Array`
+/// with no per-sample encoding at all.
 #[tauri::command]
-pub fn get_audio_samples(state: State<AppState>) -> Result<Vec<i16>, String> {
+pub fn get_audio_samples(state: State<AppState>) -> tauri::ipc::Response {
     let mut emulation = state.emulation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(emulation.get_audio())
+    let samples = emulation.get_audio();
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    tauri::ipc::Response::new(bytes)
 }
 
 /// Sets the emulation speed multiplier (1.0 = real NTSC speed; clamped to

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { getAudioService } from '../services/audio';
 
 export interface GameInfo {
   id: string;
@@ -58,7 +59,7 @@ interface EmulationState {
   frameRate: number;
   frame: VideoFrame | null;
   /** Interleaved stereo PCM samples: L0, R0, L1, R1, ... (see `getFrame`). */
-  audioBuffer: number[];
+  audioBuffer: Int16Array;
   
   // Actions
   loadRom: (path: string) => Promise<void>;
@@ -83,7 +84,7 @@ export const useEmulationStore = create<EmulationState>((set) => ({
   currentGame: null,
   frameRate: 60,
   frame: null,
-  audioBuffer: [],
+  audioBuffer: new Int16Array(0),
 
   loadRom: async (path: string) => {
     try {
@@ -150,24 +151,33 @@ export const useEmulationStore = create<EmulationState>((set) => ({
   getFrame: async () => {
     const seq = ++opSeq;
     try {
-      const raw = await invoke<RawVideoFrame>('get_video_frame');
+      // `null` means no new emulated frame completed since the last poll
+      // (the caller runs at monitor refresh rate, the console at ~60fps)
+      // -- the previous frame is still current, skip the ~230KB base64
+      // decode and keep rendering it.
+      const raw = await invoke<RawVideoFrame | null>('get_video_frame');
       // Interleaved stereo PCM (L0, R0, L1, R1, ...) -- see
       // `Snes::get_audio_samples`/`EmulationController::get_audio` on the
-      // Rust side, which now drain the DSP's real per-voice-panned L/R
-      // output instead of an averaged-to-mono value. `count` is accepted
-      // by convention but the backend command itself takes no arguments;
-      // it just drains whatever `step_frame()` already buffered.
-      const audio = await invoke<number[]>('get_audio_samples', { count: 2048 });
+      // Rust side. The command returns raw little-endian i16 bytes over
+      // Tauri's binary IPC path (`tauri::ipc::Response`), which arrives
+      // here as an ArrayBuffer -- no JSON number-array encode/parse per
+      // frame -- and is viewed as an Int16Array for free.
+      const audioBytes = await invoke<ArrayBuffer>('get_audio_samples');
       // Discard stale responses: if a newer getFrame (or start/pause/resume/
       // stop) call has been issued before this one's invokes resolved,
       // applying this result would clobber state with an older frame.
       if (seq !== opSeq) return;
-      const frame: VideoFrame = {
-        width: raw.width,
-        height: raw.height,
-        data: base64ToUint8Array(raw.data),
-      };
-      set({ frame, audioBuffer: audio });
+      const audioBuffer = new Int16Array(audioBytes);
+      if (raw) {
+        const frame: VideoFrame = {
+          width: raw.width,
+          height: raw.height,
+          data: base64ToUint8Array(raw.data),
+        };
+        set({ frame, audioBuffer });
+      } else {
+        set({ audioBuffer });
+      }
     } catch (error) {
       console.error('Failed to get frame:', error);
     }
@@ -185,6 +195,11 @@ export const useEmulationStore = create<EmulationState>((set) => ({
   loadState: async (slot: number) => {
     try {
       await invoke('load_state', { slot });
+      // The emulated timeline just jumped: anything still queued on the
+      // audio thread is pre-jump audio (the Rust side clears its own
+      // buffers too). Discarding instead of stopping keeps playback
+      // primed for the post-load samples.
+      getAudioService().clear();
     } catch (error) {
       console.error('Failed to load state:', error);
       throw error;
