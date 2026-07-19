@@ -333,9 +333,22 @@ impl EmulationController {
             .map_err(|e| format!("Failed to read file metadata: {}", e))?
             .len();
 
-        // Read the ROM file
-        let rom_data = std::fs::read(&path_buf)
-            .map_err(|e| format!("Failed to read ROM file: {}", e))?;
+        // Read the ROM file. ZIP archives go through the same extractor the
+        // library scanner already uses -- previously only the scanner
+        // understood archives, so a zipped ROM showed up in the library but
+        // failed here (raw zip bytes aren't a parseable cartridge) the
+        // moment the user hit Play.
+        let is_zip = path_buf
+            .extension()
+            .map(|e| e.to_string_lossy().eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
+        let rom_data = if is_zip {
+            crate::rom::extract_rom_from_zip(&path_buf)
+                .map_err(|e| format!("Failed to extract ROM from archive: {}", e))?
+        } else {
+            std::fs::read(&path_buf)
+                .map_err(|e| format!("Failed to read ROM file: {}", e))?
+        };
 
         // Try to create the SNES emulator and load the ROM. This is the
         // single place ROM bytes get parsed: GameInfo is built from
@@ -1088,6 +1101,80 @@ mod real_rom_tests {
         assert_eq!(
             pc_at_halt, pc_after,
             "step()/step_frame() must not advance the CPU any further once halted"
+        );
+    }
+
+    /// Loads a zipped ROM through the exact public path the frontend's Play
+    /// flow uses and proves it boots. This pins the user-facing failure that
+    /// motivated zip routing in `load_rom`: the library scanner already
+    /// understood archives, so a `.zip` showed up as a playable library
+    /// entry, but pressing Play handed the raw zip bytes to the cartridge
+    /// parser and the game never started.
+    fn assert_zipped_rom_boots(zip_name: &str, expected_title: &str) {
+        let zip_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join(zip_name);
+        let zip_path = zip_path
+            .canonicalize()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Could not locate the target ROM archive at '{}': {}. This test \
+                     exists specifically to validate that this exact file loads \
+                     correctly through EmulationController; it must not be silently \
+                     skipped.",
+                    zip_path.display(),
+                    e
+                )
+            });
+        let zip_path_str = zip_path.to_string_lossy().into_owned();
+
+        let mut controller = EmulationController::new();
+        let info = controller
+            .load_rom(&zip_path_str)
+            .expect("a zipped commercial ROM must load through the Play-flow path");
+
+        assert_eq!(info.title, expected_title);
+        assert_eq!(
+            info.rom_size, 1_048_576,
+            "rom_size must be the extracted cartridge's header-declared size, not the zip's"
+        );
+        assert_eq!(
+            info.file_size,
+            std::fs::metadata(&zip_path).unwrap().len(),
+            "file_size must be the on-disk archive size"
+        );
+        assert!(
+            info.is_valid && info.validation_errors.is_empty(),
+            "a byte-for-byte correct dump must validate cleanly: {:?}",
+            info.validation_errors
+        );
+
+        // And it must actually run: a few frames of real execution without
+        // halting, producing a full-size rendered frame.
+        controller.start(None).expect("must start after loading");
+        controller.step_frames_now(3);
+        assert!(
+            !controller.is_halted(),
+            "the zipped ROM must execute without halting: {:?}",
+            controller.halt_reason()
+        );
+        let frame = controller.get_frame();
+        assert_eq!(
+            frame.data.len(),
+            (oxidesfc_core::SCREEN_WIDTH * oxidesfc_core::SCREEN_HEIGHT * 4) as usize,
+            "stepping a zipped ROM must produce a full-size RGBA frame"
+        );
+    }
+
+    #[test]
+    fn load_rom_extracts_and_boots_zipped_castlevania4() {
+        assert_zipped_rom_boots("Super Castlevania IV (USA).zip", "SUPER CASTLEVANIA 4");
+    }
+
+    #[test]
+    fn load_rom_extracts_and_boots_zipped_a_link_to_the_past() {
+        assert_zipped_rom_boots(
+            "Legend of Zelda, The - A Link to the Past (USA).zip",
+            "THE LEGEND OF ZELDA",
         );
     }
 }

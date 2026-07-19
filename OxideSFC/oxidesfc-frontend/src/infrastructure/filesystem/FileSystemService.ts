@@ -73,7 +73,7 @@ export interface SaveFileInfo {
  * Default ROM file filters
  */
 export const ROM_FILTERS: FileFilter[] = [
-  { name: 'SNES ROMs', extensions: ['sfc', 'smc', 'fig', 'swc'] },
+  { name: 'SNES ROMs', extensions: ['sfc', 'smc', 'fig', 'swc', 'zip'] },
   { name: 'All Files', extensions: ['*'] },
 ];
 
