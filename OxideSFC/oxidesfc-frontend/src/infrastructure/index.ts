@@ -1,11 +1,10 @@
 /**
  * Infrastructure Layer
- * 
+ *
  * Core infrastructure services for the OxideSFC frontend:
  * - Emulation: Tauri-based emulation core interface
  * - Filesystem: File dialogs and ROM/save management
  * - Network: API clients for metadata fetching
- * - Input: Keyboard and gamepad input management
  */
 
 // ============================================================================
@@ -25,9 +24,3 @@ export * from './filesystem';
 // ============================================================================
 
 export * from './network';
-
-// ============================================================================
-// Input Infrastructure
-// ============================================================================
-
-export * from './input';

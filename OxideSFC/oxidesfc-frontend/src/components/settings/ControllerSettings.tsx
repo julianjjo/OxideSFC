@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { DEFAULT_KEYBOARD_MAPPING } from '../../domain/keyboardDefaults';
 import { Button } from '../common/Button';
 import { Toggle } from '../common/Toggle';
 import { Modal } from '../common/Modal';
@@ -20,20 +21,6 @@ const SNES_BUTTONS = [
   { key: 'start', label: 'Start' },
   { key: 'select', label: 'Select' },
 ];
-
-// Default keyboard mappings
-const DEFAULT_KEYBOARD_MAPPING: Record<string, string> = {
-  ArrowUp: 'up',
-  ArrowDown: 'down',
-  ArrowLeft: 'left',
-  ArrowRight: 'right',
-  KeyZ: 'a',
-  KeyX: 'b',
-  Enter: 'start',
-  ShiftRight: 'select',
-  KeyA: 'l',
-  KeyS: 'r',
-};
 
 // Gamepad button mapping
 interface GamepadState {
@@ -117,6 +104,14 @@ export function ControllerSettings() {
       e.preventDefault();
 
       const keyCode = e.code;
+
+      // Escape cancels remapping instead of being bound as the new key --
+      // the UI's "(ESC to cancel)" hint has to actually be true.
+      if (keyCode === 'Escape') {
+        setIsListening(false);
+        setMappingKey(null);
+        return;
+      }
 
       // Check if already in use
       const existingBinding = Object.entries(keyboardMapping).find(

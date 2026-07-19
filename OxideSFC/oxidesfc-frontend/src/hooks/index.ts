@@ -2,20 +2,13 @@
  * Hooks Module for OxideSFC Frontend
  *
  * Exports all custom React hooks for the application:
- * - useKeyboard: Keyboard input handling
  * - useGamepad: Gamepad input handling
  * - useDatabase: Local database operations
+ *
+ * Keyboard input is handled directly in EmulatorView.tsx /
+ * ControllerSettings.tsx against the canonical mapping in
+ * domain/keyboardDefaults.ts, not through a hook.
  */
-
-// ============================================================================
-// Keyboard Hook
-// ============================================================================
-
-export { useKeyboard, DEFAULT_SNES_KEYBOARD_MAPPING } from './useKeyboard';
-export type { 
-  KeyboardHookConfig, 
-  ModifierKeys 
-} from './useKeyboard';
 
 // ============================================================================
 // Gamepad Hook
