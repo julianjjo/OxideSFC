@@ -6,6 +6,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { WebGLRenderer } from '../../services/renderer';
 import { getAudioService } from '../../services/audio';
 import { useGamepad } from '../../hooks/useGamepad';
+import { DEFAULT_KEYBOARD_MAPPING, SNES_BUTTON_BITMASK } from '../../domain/keyboardDefaults';
 import { QuickMenu } from './QuickMenu';
 import { ControlDeck } from './ControlDeck';
 import { captureScreenshot } from './captureScreenshot';
@@ -212,42 +213,22 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
 
   // Input mapping
   //
-  // Hardcoded default map, used as a fallback for any SNES button that has
-  // no entry in the user's saved `settings.controls.keyboard_mapping` (e.g.
-  // a fresh install, or a mapping object missing a key). The *actual*
+  // DEFAULT_KEY_TO_BUTTON (a fallback for any SNES button that has no entry
+  // in the user's saved `settings.controls.keyboard_mapping` -- e.g. a fresh
+  // install, or a mapping object missing a key) and BUTTON_NAME_TO_MASK (the
+  // SNES button name -> wire-format bitmask lookup) are both derived from
+  // DEFAULT_KEYBOARD_MAPPING/SNES_BUTTON_BITMASK in domain/keyboardDefaults.ts
+  // -- the single source of truth shared with ControllerSettings.tsx, so the
+  // two can't drift out of sync with each other again. The *actual*
   // key-to-button lookup used at key-event time is `keyToButtonRef` below,
   // which is rebuilt from the live settings so in-game remapping (done via
   // ControllerSettings.tsx, which persists key-code -> SNES-button-name
   // pairs into `settings.controls.keyboard_mapping`) takes effect during
   // play instead of being silently ignored.
-  const DEFAULT_KEY_TO_BUTTON: Record<string, number> = {
-    'ArrowUp': 0x01,
-    'ArrowDown': 0x02,
-    'ArrowLeft': 0x04,
-    'ArrowRight': 0x08,
-    'KeyZ': 0x10, // A
-    'KeyX': 0x20, // B
-    'Enter': 0x40, // Start
-    'ShiftRight': 0x80, // Select
-    'KeyA': 0x100, // L
-    'KeyS': 0x200, // R
-  };
-
-  // SNES button name (as stored in keyboard_mapping values) -> bitmask.
-  const BUTTON_NAME_TO_MASK: Record<string, number> = {
-    up: 0x01,
-    down: 0x02,
-    left: 0x04,
-    right: 0x08,
-    a: 0x10,
-    b: 0x20,
-    start: 0x40,
-    select: 0x80,
-    l: 0x100,
-    r: 0x200,
-    x: 0x400,
-    y: 0x800,
-  };
+  const BUTTON_NAME_TO_MASK: Record<string, number> = SNES_BUTTON_BITMASK;
+  const DEFAULT_KEY_TO_BUTTON: Record<string, number> = Object.fromEntries(
+    Object.entries(DEFAULT_KEYBOARD_MAPPING).map(([keyCode, button]) => [keyCode, BUTTON_NAME_TO_MASK[button]])
+  );
 
   // Rebuilt whenever the persisted keyboard_mapping changes, so remapping
   // takes effect immediately without needing to remount this component.
