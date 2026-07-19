@@ -90,10 +90,12 @@ impl Default for ControlSettings {
         mapping.insert("ArrowRight".to_string(), "right".to_string());
         mapping.insert("KeyZ".to_string(), "a".to_string());
         mapping.insert("KeyX".to_string(), "b".to_string());
+        mapping.insert("KeyA".to_string(), "x".to_string());
+        mapping.insert("KeyS".to_string(), "y".to_string());
+        mapping.insert("KeyQ".to_string(), "l".to_string());
+        mapping.insert("KeyW".to_string(), "r".to_string());
         mapping.insert("Enter".to_string(), "start".to_string());
         mapping.insert("ShiftRight".to_string(), "select".to_string());
-        mapping.insert("KeyA".to_string(), "l".to_string());
-        mapping.insert("KeyS".to_string(), "r".to_string());
 
         Self {
             keyboard_enabled: true,
