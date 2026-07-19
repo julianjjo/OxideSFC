@@ -133,7 +133,7 @@ impl Snes {
         self.halted.clone()
     }
 
-    fn get_frame(&self) -> super::video::VideoFrame {
+    fn get_frame(&mut self) -> super::video::VideoFrame {
         let data = self.bus.render_frame();
         super::video::VideoFrame::from_raw(
             oxidesfc_core::SCREEN_WIDTH as u32,

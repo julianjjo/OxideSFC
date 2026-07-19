@@ -21,9 +21,9 @@ plans/                  Design & status documents (aspirational/historical, not 
 
 - **CPU** — 65C816 with all 256 opcodes implemented (the dispatch match is compiler-checked for exhaustiveness), NMI/IRQ handling, and hardware multiply/divide registers.
 - **APU** — SPC700 with all 256 opcodes, timers, and a full S-DSP synthesizer: BRR sample decoding, ADSR/GAIN envelopes, pitch modulation, echo with FIR filter, and noise.
-- **PPU** — background modes 0–7, including Mode 7 with EXTBG; 8×8 and 16×16 tiles; hi-res modes 5/6 (real 512-dot sampling collapsed by dot-pair averaging); sprites; windowing; mosaic; color math; direct color.
-- **DMA / HDMA** — all 8 channels with real immediate-DMA and per-scanline HDMA execution.
-- **Timing** — master-clock based: every bus access is billed its real per-region cost (6/8/12 master cycles, FastROM-aware via MEMSEL), 4 master cycles per PPU dot, 8 per DMA byte.
+- **PPU** — background modes 0–7, including Mode 7 with EXTBG; 8×8 and 16×16 tiles; hi-res modes 5/6 (real 512-dot sampling collapsed by dot-pair averaging) and pseudo-hires; overscan (vblank/NMI at line 239); sprites with the hardware's per-scanline 32-sprite/34-tile limits, priority rotation, and STAT77 range/time-over flags; offset-per-tile (modes 2/4); windowing; mosaic; color math; direct color; VRAM read prefetch buffer, VMAIN address remapping, and active-display VRAM write blocking; the two separate PPU1/PPU2 open-bus registers.
+- **DMA / HDMA** — all 8 channels with real immediate-DMA and per-scanline HDMA execution, hardware setup/sync overheads, per-byte machine ticking (NMI/IRQ/HDMA fire mid-transfer at their real positions), and the same-channel HDMA-kills-DMA conflict.
+- **Timing** — master-clock based: every bus access is billed its real per-region cost (6/8/12 master cycles, FastROM-aware via MEMSEL), 4 master cycles per PPU dot, 8 per DMA byte, 40-cycle WRAM refresh stalls per scanline, and dot-exact H/V timer IRQs.
 - **Save states** — versioned binary snapshots covering CPU, WRAM, PPU memory/registers, DMA, the complete APU (including transient synthesis state, so a restored state resumes mid-note), and cartridge SRAM.
 
 ## Frontend (`oxidesfc-frontend`)
@@ -69,6 +69,14 @@ cargo test -p oxidesfc-core    # core tests only
 ```
 
 Unit tests cover the CPU, SPC700, PPU, DMA, and bus in isolation (every opcode of both processors is pinned by tests). In addition, end-to-end tests boot a real ROM through the full system; these expect `Super Mario World (U) [!].smc` at the repository root and **fail loudly if it's missing** — the ROM is not included (see below), so skip those tests or provide your own legally obtained copy.
+
+## Acknowledgments
+
+OxideSFC is an **original emulator implementation written from scratch in Rust — it is not a port** of any existing emulator, and it shares no code with one.
+
+That said, several hardware-accuracy improvements were implemented using [snes9x](https://github.com/snes9xgit/snes9x) (C++, snes9x team) as a *behavioral reference*: its source code documents, in working form, many S-CPU/PPU details that took the snes9x developers years of hardware research to get right. Areas where snes9x's behavior was studied and re-implemented independently in Rust include: NMI/IRQ timer edge cases (H/V timer trigger positions, NMI-enable-during-vblank), CPU and PPU open-bus behavior (including the two separate PPU MDRs), WRAM refresh stalls, DMA/HDMA timing overheads and frame scheduling, the VRAM read prefetch buffer and VMAIN address remapping, OAM write latching and sprite priority rotation, per-scanline sprite limits (STAT77 range/time-over), and offset-per-tile.
+
+Many thanks to the snes9x team and to the SNES documentation community (fullsnes, anomie's docs, the SNESdev wiki) whose work makes accurate emulation possible.
 
 ## Legal
 

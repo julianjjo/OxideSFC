@@ -7,7 +7,7 @@ use crate::error::EmulationError;
 
 /// Magic + version prefix for whole-machine snapshots.
 const SNAPSHOT_MAGIC: &[u8; 4] = b"OXSF";
-const SNAPSHOT_VERSION: u16 = 2;
+const SNAPSHOT_VERSION: u16 = 3;
 
 /// Serializes the whole machine (CPU + everything `SystemBus` owns) into
 /// a versioned byte buffer. The ROM itself is not included -- a snapshot
