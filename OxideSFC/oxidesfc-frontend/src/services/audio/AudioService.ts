@@ -36,6 +36,8 @@ export interface AudioStats {
   droppedFrames: number;
   /** Current dynamic-rate-control ratio (1.0 = no correction). */
   drcRatio: number;
+  /** True while the ring is refilling to the latency target (output silent). */
+  priming: boolean;
   /** AudioContext graph latency, ms (0 if unavailable). */
   baseLatencyMs: number;
   /** Context-to-device output latency, ms (0 if unavailable). */
@@ -104,6 +106,17 @@ class OxideSFCAudioProcessor extends AudioWorkletProcessor {
     this.starved = false;
     this.droppedFrames = 0;
     this.framesSinceStats = 0;
+    // While priming, output silence and consume nothing until the ring has
+    // filled to the latency target. Without this the ring starts (and, after
+    // every underrun, restarts) nearly empty and the ONLY thing pushing the
+    // fill level up towards the setpoint is the DRC's +/-0.5% differential --
+    // at most ~160 source frames per second of headroom, so climbing from one
+    // ~533-frame burst to a 1920-frame target took about 12 seconds. Through
+    // that whole window the buffer sat near-empty and any main-thread hiccup
+    // longer than a frame underran again, so glitches arrived in clusters
+    // instead of being absorbed. Priming turns each one into a single bounded
+    // pause (~4 video frames) and then a buffer that can actually absorb jitter.
+    this.priming = true;
     this.port.onmessage = (event) => this.handleMessage(event.data);
   }
 
@@ -129,6 +142,9 @@ class OxideSFCAudioProcessor extends AudioWorkletProcessor {
         this.writeIdx = 0;
         this.count = 0;
         this.readFrac = 0;
+        // Refill to the target before playing again rather than consuming
+        // from an empty ring.
+        this.priming = true;
         break;
     }
   }
@@ -169,10 +185,17 @@ class OxideSFCAudioProcessor extends AudioWorkletProcessor {
     this.drcRatio = (1 - this.maxDelta) + 2 * fill * this.maxDelta;
     const step = this.baseStep * this.playbackRate * this.drcRatio;
 
+    // Priming ends once the ring holds a full latency target, so playback
+    // resumes with the DRC already at its setpoint (ratio 1.0) instead of
+    // pinned to one extreme trying to claw the level up.
+    if (this.priming && this.count >= this.targetFrames) {
+      this.priming = false;
+    }
+
     for (let i = 0; i < frames; i++) {
       let l;
       let r;
-      if (this.playing && this.count > 1) {
+      if (this.playing && !this.priming && this.count > 1) {
         this.starved = false;
         // Linear interpolation between the current and next queued frame,
         // stepping the read position by (baseStep * playbackRate * drc)
@@ -190,11 +213,15 @@ class OxideSFCAudioProcessor extends AudioWorkletProcessor {
         this.lastL = l;
         this.lastR = r;
       } else {
-        // Underrun (or intentionally stopped): hold the last sample,
+        // Underrun (or intentionally stopped/priming): hold the last sample,
         // decaying to zero, to avoid a hard click.
-        if (this.playing && !this.starved) {
+        if (this.playing && !this.priming && !this.starved) {
           this.starved = true;
           this.underrunEvents++;
+          // Re-prime: refill to the target before consuming again, so one
+          // late frame doesn't leave the ring empty and immediately underrun
+          // on the next quantum too.
+          this.priming = true;
         }
         this.lastL *= 0.95;
         this.lastR *= 0.95;
@@ -224,6 +251,7 @@ class OxideSFCAudioProcessor extends AudioWorkletProcessor {
         underrunEvents: this.underrunEvents,
         droppedFrames: this.droppedFrames,
         drcRatio: this.drcRatio,
+        priming: this.priming,
       });
     }
     return true;
@@ -249,6 +277,7 @@ export class AudioService {
     underrunEvents: 0,
     droppedFrames: 0,
     drcRatio: 1,
+    priming: true,
   };
 
   constructor(config: Partial<AudioServiceConfig> = {}) {
@@ -353,8 +382,8 @@ export class AudioService {
     });
     this.workletNode.port.onmessage = (event) => {
       if (event.data?.type === 'stats') {
-        const { fillFrames, underrunEvents, droppedFrames, drcRatio } = event.data;
-        this.lastStats = { fillFrames, underrunEvents, droppedFrames, drcRatio };
+        const { fillFrames, underrunEvents, droppedFrames, drcRatio, priming } = event.data;
+        this.lastStats = { fillFrames, underrunEvents, droppedFrames, drcRatio, priming };
       }
     };
     this.workletNode.connect(gain);

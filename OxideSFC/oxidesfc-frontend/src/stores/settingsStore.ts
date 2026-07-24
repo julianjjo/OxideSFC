@@ -77,7 +77,12 @@ const defaultSettings: AppSettings = {
   audio: {
     enabled: true,
     volume: 1.0,
-    latency: 50,
+    // Buffer target the audio worklet's dynamic rate control regulates
+    // towards. This has to stay in step with AudioService's own default: 50
+    // is the value that measurably underran during bursty stepping, and
+    // because `50` is truthy, EmulatorView's `settings.audio?.latency || 60`
+    // fallback never applied -- every user ran at the known-bad value.
+    latency: 60,
     sfx_volume: 100,
     music_volume: 100,
     buffering_enabled: true,

@@ -219,9 +219,18 @@ fn render_band(
     // window-mask selector.
     let pseudo_hires = regs.setini & 0x08 != 0 && (regs.bgmode & 0x07) < 5;
     let use_subscreen = regs.cgwsel & 0x02 != 0;
+    // The SUB screen's backdrop is the fixed COLDATA color, not CGRAM color
+    // 0 -- only the MAIN screen's backdrop is CGRAM 0 (bsnes:
+    // `belowColor = hires ? cgram[0] : io.col.fixedColor`). This was CGRAM 0
+    // for both, so every subscreen-based translucency effect (water, glass,
+    // fog, shadows, spotlights, HUD overlays) blended against the wrong
+    // operand wherever TS left the subscreen empty -- which is most of the
+    // screen in most such effects.
+    let hires = pseudo_hires || matches!(regs.bgmode & 0x07, 5 | 6);
+    let sub_backdrop = if hires { backdrop } else { regs.coldata & 0x7FFF };
     if use_subscreen || pseudo_hires {
         for i in y0 * SCREEN_WIDTH..y1 * SCREEN_WIDTH {
-            scratch.sub[i] = backdrop;
+            scratch.sub[i] = sub_backdrop;
             scratch.sub_layer[i] = LAYER_BACKDROP;
         }
         render_layers(&mut scratch.sub, &mut scratch.sub_layer, regs.ts, regs.tsw, vram, cgram, oam, regs, &sprite_eval, y0, y1);
@@ -266,7 +275,17 @@ fn render_band(
         // Color math applies only if enabled for this pixel's source layer.
         if math_allowed && math_enable & (1 << scratch.main_layer[i]) != 0 {
             let operand = if use_subscreen { scratch.sub[i] } else { fixed };
-            color = color_math(main_color, operand, subtract, half);
+            // Hardware skips the halve in two cases that `half` alone
+            // doesn't capture (bsnes `PPU::Line::pixel`: `io.col.halve &&
+            // windowAbove[x] && below.source != Source::COL`): when the main
+            // pixel was clipped to black by the color window, and when the
+            // subscreen operand is the backdrop rather than a real layer.
+            // Applying it unconditionally halved effects hardware leaves at
+            // full intensity.
+            let halve = half
+                && !force_black
+                && (!use_subscreen || scratch.sub_layer[i] != LAYER_BACKDROP);
+            color = color_math(main_color, operand, subtract, halve);
         }
         // Pseudo-hires (SETINI bit 3): hardware outputs the subscreen on
         // even half-dots and the main screen on odd ones -- on this fixed
@@ -322,8 +341,13 @@ fn evaluate_sprites(oam: &Oam, regs: &PpuRegisters, y0: usize, y1: usize) -> Spr
         let (w, h) = if size_bit != 0 { large_size } else { small_size };
         let x_full = ((x_high_bit as u16) << 8) | (x_low as u16);
         let x: i32 = if x_full & 0x100 != 0 { (x_full as i32) - 512 } else { x_full as i32 };
-        let y: i32 = if y_raw >= 0xF0 { (y_raw as i32) - 256 } else { y_raw as i32 };
-        *slot = (x, y, w, h);
+        // Y stays the raw 0-255 register value: hardware decides whether a
+        // sprite covers a line with `(line - y) & 0xFF < height`, so a tall
+        // sprite parked near the bottom wraps and shows its lower rows at the
+        // top of the screen. This used to bias `y_raw >= 0xF0` down by 256,
+        // which reproduces the wrap only for sprites up to 16 pixels tall --
+        // 32- and 64-pixel sprites silently lost their wrapped slice.
+        *slot = (x, y_raw as i32, w, h);
     }
 
     let mut masks = vec![0u128; y1 - y0];
@@ -336,7 +360,8 @@ fn evaluate_sprites(oam: &Oam, regs: &PpuRegisters, y0: usize, y1: usize) -> Spr
         for k in 0..128u8 {
             let s = (first.wrapping_add(k) & 0x7F) as usize;
             let (x, y, w, h) = geom[s];
-            if ly < y || ly >= y + h as i32 {
+            // Hardware's vertical range test, wrapping at 256 (see `geom`).
+            if ((ly - y) & 0xFF) as u32 >= h {
                 continue;
             }
             if x + (w as i32) <= 0 || x >= SCREEN_WIDTH as i32 {
@@ -617,7 +642,10 @@ fn mode7_sample(vram: &Vram, regs: &PpuRegisters, x: usize, y: usize) -> Option<
 fn direct_color(pixel: u8, palette: u8) -> u16 {
     let r = (((pixel & 0x07) << 2) | ((palette & 0x01) << 1)) as u16;
     let g = ((((pixel >> 3) & 0x07) << 2) | (palette & 0x02)) as u16;
-    let b = ((((pixel >> 6) & 0x03) << 3) | ((palette & 0x04) >> 1)) as u16;
+    // The palette's blue bit lands in blue's bit 2, not bit 1: bsnes'
+    // `directColor` places it with `paletteIndex << 10 & 0x1000`, which is
+    // bit 12 of the BGR555 word = bit 2 of the 5-bit blue channel.
+    let b = ((((pixel >> 6) & 0x03) << 3) | (palette & 0x04)) as u16;
     r | (g << 5) | (b << 10)
 }
 
@@ -820,6 +848,14 @@ fn draw_bg_layer(
         1
     };
 
+    // In mode 0 every BG gets its own 32-color block of CGRAM: BG1 uses
+    // colors 0-31, BG2 32-63, BG3 64-95, BG4 96-127 (higan's
+    // `paletteOffset = bgMode == 0 ? id << 5 : 0`). Without this offset all
+    // four 2bpp layers indexed BG1's palettes, so three of the four layers
+    // on every mode-0 screen rendered in visibly wrong colors. Mode 1's
+    // 2bpp BG3 correctly takes no offset, so this is mode-0-specific.
+    let mode0_palette_base: u16 = if mode == 0 { (bg as u16) << 5 } else { 0 };
+
     let (map_w_tiles, map_h_tiles): (u32, u32) = match screen_size {
         0 => (32, 32),
         1 => (64, 32),
@@ -884,7 +920,7 @@ fn draw_bg_layer(
         }
 
         let cgram_index = match depth {
-            2 => (palette_num * 4 + pixel_value as u16) as u8,
+            2 => (mode0_palette_base + palette_num * 4 + pixel_value as u16) as u8,
             4 => (palette_num * 16 + pixel_value as u16) as u8,
             _ => pixel_value, // 8bpp: direct index, no palette grouping
         };
@@ -1097,12 +1133,11 @@ fn draw_sprites(
 
         let x_full = ((x_high_bit as u16) << 8) | (x_low as u16);
         let x: i32 = if x_full & 0x100 != 0 { (x_full as i32) - 512 } else { x_full as i32 };
-        let y: i32 = if y_raw >= 0xF0 { (y_raw as i32) - 256 } else { y_raw as i32 };
+        // Raw 0-255 Y; rows are placed mod 256 below, matching hardware's
+        // wrapping range test (see `evaluate_sprites`).
+        let y: i32 = y_raw as i32;
 
         if x + (w as i32) <= 0 || x >= SCREEN_WIDTH as i32 {
-            continue;
-        }
-        if y + (h as i32) <= 0 || y >= SCREEN_HEIGHT as i32 {
             continue;
         }
 
@@ -1118,7 +1153,7 @@ fn draw_sprites(
         let tile_base = tile_low | (((attrs & 0x01) as u16) << 8);
 
         for ty in 0..h {
-            let screen_y = y + ty as i32;
+            let screen_y = (y + ty as i32) & 0xFF;
             if screen_y < y0 as i32 || screen_y >= y1 as i32 {
                 continue;
             }
@@ -1372,6 +1407,71 @@ mod tests {
         let expected = bgr555_to_rgb8(cgram.read_color(129));
         let idx = (10 * SCREEN_WIDTH + 20) * 4;
         assert_eq!((fb[idx], fb[idx + 1], fb[idx + 2]), expected);
+    }
+
+    #[test]
+    fn tall_sprite_near_the_bottom_wraps_its_rows_to_the_top_of_the_screen() {
+        // Hardware's vertical range test is `(line - y) & 0xFF < height`, so a
+        // 32-pixel sprite at Y=250 shows rows 6..31 on screen lines 0..25.
+        // The old `y >= 0xF0 ? y - 256 : y` biasing reproduces that only for
+        // sprites up to 16 pixels tall; taller ones lost the wrapped slice.
+        let mut vram = Vram::new();
+        let mut cgram = Cgram::new();
+        let mut oam = Oam::new();
+
+        // A tile whose every row has pixel value 1 in column 0, so any row of
+        // the sprite that draws is detectable. A 32x32 sprite spans 4 tile
+        // rows, and consecutive tile rows step the tile number by 16, so
+        // tiles 0/16/32/48 are the four covering the sprite's first column.
+        // Each 4bpp tile occupies 32 bytes of VRAM.
+        let solid_col = [1u8, 0, 0, 0, 0, 0, 0, 0];
+        let tile = make_2bpp_tile([solid_col; 8]);
+        for tile_num in [0u16, 16, 32, 48] {
+            for (i, &b) in tile.iter().enumerate() {
+                vram.write(tile_num * 32 + i as u16, b);
+            }
+        }
+
+        // Sprite 0: X=8, Y=250, large size (32x32 via OBSEL size pair 1).
+        oam.write(0, 8); // X
+        oam.write(1, 250); // Y
+        oam.write(2, 0); // tile
+        oam.write(3, 0x00); // attrs: palette 0, priority 0
+        oam.write(512, 0x02); // high table: sprite 0 size bit set -> large
+
+        cgram.write(129 * 2, 0xE0);
+        cgram.write(129 * 2 + 1, 0x03);
+
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F;
+        regs.obsel = 0x20; // size pair 1 = 8x8 / 32x32
+        regs.tm = 0x10; // sprites only
+
+        let fb = render_frame(&vram, &cgram, &oam, &regs);
+        let expected = bgr555_to_rgb8(cgram.read_color(129));
+
+        // Row 6 of the sprite lands on screen line 0 ((250 + 6) & 0xFF).
+        let top = (0 * SCREEN_WIDTH + 8) * 4;
+        assert_eq!(
+            (fb[top], fb[top + 1], fb[top + 2]),
+            expected,
+            "the wrapped rows of a tall low-parked sprite must appear at the top"
+        );
+        // Row 25 lands on line 25; row 31 wraps to line 25 + 6 = ... the last
+        // visible wrapped line is 31 - 6 = 25.
+        let last = (25 * SCREEN_WIDTH + 8) * 4;
+        assert_eq!(
+            (fb[last], fb[last + 1], fb[last + 2]),
+            expected,
+            "the whole wrapped slice must draw, not only its first line"
+        );
+        // Line 26 is past the sprite's last row, so it must be backdrop.
+        let past = (26 * SCREEN_WIDTH + 8) * 4;
+        assert_ne!(
+            (fb[past], fb[past + 1], fb[past + 2]),
+            expected,
+            "the sprite must not extend past its 32-pixel height"
+        );
     }
 
     #[test]

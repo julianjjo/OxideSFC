@@ -203,9 +203,71 @@ Todo lo accionable de la sección 7 quedó implementado y verificado en vivo
    el core optimizado los underruns pasaron de ~7/s a ~4/min en el entorno
    dev instrumentado.
 
+### Segunda ronda (fidelidad del DSP y estabilidad del buffer)
+
+La primera ronda arregló el *transporte* del audio; esta arregla la
+*síntesis* y la recuperación del buffer. Auditando el DSP contra
+`SPC_DSP.cpp` de bsnes aparecieron cuatro defectos de fidelidad que
+explicaban por qué el audio "suena pero no como bsnes":
+
+1. ✅ **Orden de nibbles BRR invertido** (`apu.rs`, `BrrDecoder::decode`). El
+   hardware reproduce nibble alto de cada byte y luego el bajo
+   (H0,L0,H1,L1,…); el código emitía los ocho bajos y después los ocho
+   altos. Eso desordenaba temporalmente cada bloque de 16 muestras de
+   *cada* sample de *cada* juego y además hacía correr el historial de los
+   filtros de predicción en el orden equivocado, así que las amplitudes
+   decodificadas también salían mal. Se oía como aspereza/granulado
+   constante en todo instrumento muestreado. Era el defecto de calidad
+   dominante.
+2. ✅ **Interpolación gaussiana real** en vez de Catmull-Rom (tabla `GAUSS`
+   de 512 entradas transcrita de bsnes, con el truncado a 16 bits a mitad
+   de la suma y el borrado del bit bajo que hace el hardware). La gaussiana
+   es un filtro paso-bajo que el contenido BRR asume; Catmull-Rom es más
+   brillante, deja pasar el ruido de cuantización del BRR y sobreoscila.
+3. ✅ **Generador de ruido (LFSR de 15 bits) y NON ($3D)**: no existían. Las
+   voces marcadas para ruido reproducían su sample BRR, así que percusión
+   (charles, cajas, platillos) y efectos basados en ruido (viento, lluvia,
+   explosiones) estaban mal o ausentes en buena parte de la biblioteca.
+4. ✅ **Modulación de pitch (PMON $2D)**: tampoco existía; los efectos de
+   vibrato/growl sonaban a pitch fijo.
+
+Y de precisión/robustez: saturación a 16 bits **por voz** (el hardware
+satura tras cada suma, no al final de la mezcla), FLG bit 6 (mute) y bit 7
+(soft reset), escritura de ENVX/OUTX ($x8/$x9) que los drivers consultan
+para fades y robo de voces, y el latch de EDL ($7D) al dar la vuelta el
+buffer de eco en vez de reasignarlo a ceros (que producía un corte de eco
+con clic al cambiar de canción).
+
+Además, el SPC700 ejecutaba **una instrucción completa por ciclo** y
+descartaba el coste devuelto por `step()`, es decir ~3.5× su rendimiento
+real. El tempo salía bien porque timers y divisor del DSP estaban
+calibrados en esas unidades, pero cualquier driver cuyo timing dependa de
+cuánto trabajo cabe entre dos ticks de timer veía una máquina 3.5× más
+rápida. Ahora cada instrucción cobra sus ciclos reales y los timers se
+mueven por ciclo (con el sobrante acarreado entre llamadas).
+
+Del lado del reproductor, la causa de los "fallos ocasionales" era la
+**ausencia de prellenado**: el ring empezaba —y tras cada underrun volvía a
+empezar— casi vacío, y lo único que empujaba el nivel hacia el objetivo era
+el diferencial ±0.5% del DRC, unos 160 frames/s de margen: subir de una
+ráfaga de ~533 frames a 1920 tardaba ~12 segundos. Durante toda esa ventana
+cualquier tirón del hilo principal volvía a vaciarlo, así que los glitches
+llegaban en racimos. Ahora el worklet hace *priming* (silencio, sin
+consumir, hasta llenar el objetivo) al arrancar, al hacer `clear` y tras
+cada underrun, de modo que cada incidente es una pausa acotada (~4 frames)
+y luego un buffer que sí absorbe jitter. También se corrigió que el default
+de `settingsStore` (50 ms, el valor que medimos como insuficiente) pisara
+el 60 ms calibrado —al ser `50` truthy, el fallback `|| 60` nunca aplicaba—
+y que una respuesta obsoleta de `getFrame` dejara el buffer anterior en el
+store, con lo que el bucle de render lo encolaba **una segunda vez** (un
+trozo de ~16 ms repetido, además del hueco de las muestras descartadas).
+
 Pendiente (mejora de fondo, no bloqueante): mover el productor a un hilo
 Rust auto-paseado que empuje audio por `tauri::ipc::Channel`, para
 independizar el bombeo del rAF del webview (ventanas ocluidas/minimizadas).
+Y, como paridad fina con bsnes, resampler cúbico en el worklet (hoy lineal,
+irrelevante mientras el contexto corra a 32 kHz) y ESA/eco dentro de la RAM
+del APU.
 
 ## Fuentes principales
 

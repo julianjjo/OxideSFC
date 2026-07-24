@@ -3,6 +3,28 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 
+/// Maps a cartridge header's region byte ($FFD9) to the video standard the
+/// game expects, using bsnes' table (`SuperFamicom::videoRegion`): Japan
+/// (0x00), USA (0x01), Taiwan (0x0B), Korea (0x0D), Canada (0x0F) and Brazil
+/// (0x10) are 60 Hz; everything else is a 50 Hz PAL territory.
+fn video_mode_for_region(region_code: u8) -> oxidesfc_core::PpuMode {
+    match region_code {
+        0x00 | 0x01 | 0x0B | 0x0D | 0x0F | 0x10 => oxidesfc_core::PpuMode::Ntsc,
+        _ => oxidesfc_core::PpuMode::Pal,
+    }
+}
+
+/// Frames per second for a video standard, derived from the same constants
+/// the core paces the machine with: 21,477,272 Hz master clock / (341 dots x
+/// 4 master cycles x 262 lines) = 60.0988 for NTSC, and 21,281,370 /
+/// (341 x 4 x 312) = 50.007 for PAL.
+fn target_fps(mode: oxidesfc_core::PpuMode) -> f64 {
+    match mode {
+        oxidesfc_core::PpuMode::Ntsc => 60.0988,
+        oxidesfc_core::PpuMode::Pal => 50.0070,
+    }
+}
+
 // Wrapper for the SNES emulator - composes core components
 struct Snes {
     cpu: oxidesfc_core::Cpu,
@@ -27,6 +49,18 @@ impl Snes {
         // Clone data to owned Vec as Cartridge::new requires Vec<u8>
         let rom_vec = data.to_vec();
         self.bus.load_cartridge(rom_vec).map_err(|e| format!("{:?}", e))?;
+        // Put the PPU in the video mode the cartridge was built for. The core
+        // has always supported PAL (312 lines, 50.007 Hz) but nothing ever
+        // selected it: `SystemBus::new` hardcodes NTSC and the header's
+        // region byte was only ever parsed into a display string. Every PAL
+        // ROM therefore ran as NTSC -- 60.0988 / 50.007 = 1.2x too fast,
+        // with the music at the right tempo (the SPC700 has its own clock),
+        // which is exactly the "runs faster than bsnes" symptom.
+        let mode = self
+            .header()
+            .map(|h| video_mode_for_region(h.region_code))
+            .unwrap_or(oxidesfc_core::PpuMode::Ntsc);
+        self.bus.set_video_mode(mode);
         self.cpu.reset(&mut self.bus).map_err(|e| format!("{:?}", e))?;
         self.halted = None;
         Ok(())
@@ -623,16 +657,22 @@ impl EmulationController {
             return;
         }
 
-        const NTSC_FPS: f64 = 60.0988;
+        // Pace against the loaded cartridge's video standard, not always
+        // NTSC -- a PAL game stepped at 60.0988 fps runs 20% fast.
+        let fps = self
+            .snes
+            .as_ref()
+            .map(|s| target_fps(s.bus.ppu_ref().mode()))
+            .unwrap_or(60.0988);
         let now = Instant::now();
         let elapsed = match self.last_pace {
             // Cap the gap so a stall (debugger, OS sleep, long GC pause)
             // doesn't queue a huge catch-up burst.
             Some(prev) => (now - prev).as_secs_f64().min(0.1),
-            None => 1.0 / NTSC_FPS,
+            None => 1.0 / fps,
         };
         self.last_pace = Some(now);
-        self.frame_debt += elapsed * NTSC_FPS * self.speed;
+        self.frame_debt += elapsed * fps * self.speed;
 
         // Never step more than a handful of frames per call: if the host
         // can't keep up, dropping the debt (running slow) beats spiraling
@@ -772,6 +812,42 @@ impl EmulationController {
 
     pub fn get_game_info(&self) -> Option<GameInfo> {
         self.current_game.clone()
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+    use oxidesfc_core::PpuMode;
+
+    #[test]
+    fn region_byte_selects_the_video_standard_bsnes_would() {
+        // bsnes' `SuperFamicom::videoRegion` table. Getting this backwards
+        // is very visible: a 50 Hz standard on an NTSC game runs it 17%
+        // slow, and 60 Hz on a PAL game runs it 20% fast (the bug this
+        // table fixes -- nothing selected PAL at all before).
+        for code in [0x00u8, 0x01, 0x0B, 0x0D, 0x0F, 0x10] {
+            assert_eq!(
+                video_mode_for_region(code),
+                PpuMode::Ntsc,
+                "region 0x{:02X} is a 60 Hz territory",
+                code
+            );
+        }
+        for code in [0x02u8, 0x03, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0C, 0x11, 0x12] {
+            assert_eq!(
+                video_mode_for_region(code),
+                PpuMode::Pal,
+                "region 0x{:02X} is a 50 Hz territory",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn each_video_standard_paces_at_its_own_frame_rate() {
+        assert!((target_fps(PpuMode::Ntsc) - 60.0988).abs() < 0.001);
+        assert!((target_fps(PpuMode::Pal) - 50.007).abs() < 0.001);
     }
 }
 
@@ -935,6 +1011,106 @@ mod real_rom_tests {
             audio.len() <= 4096 * 5,
             "get_audio() must not return more than the accumulated per-frame sample budget across the undrained frames, got {}",
             audio.len()
+        );
+    }
+
+    /// Diagnostic tool, not an assertion: boots a ROM and writes raw RGBA
+    /// frames to disk so rendering can be compared against a reference
+    /// emulator's screenshots by eye. This is how the renderer's mid-frame
+    /// timing and color-math fixes were verified -- unit tests can pin
+    /// individual pixels, but only a real game's real title screen shows
+    /// whether sprites line up with backgrounds.
+    ///
+    /// ```text
+    /// OXIDESFC_FRAME_DUMP_DIR=/tmp/frames \
+    /// OXIDESFC_FRAME_DUMP_ROM="/path/to/game.sfc" \
+    /// OXIDESFC_FRAME_DUMP_TAG=game \
+    /// OXIDESFC_FRAME_DUMP_LAST=900 \
+    ///   cargo test -p oxidesfc-frontend dump_real_rom_frames -- --ignored
+    /// ```
+    ///
+    /// Four evenly-spaced frames are written as `<tag>_frameNNNN_WxH.rgba`
+    /// (tightly packed RGBA8888, convertible to PNG with any tool).
+    #[test]
+    #[ignore = "diagnostic: dumps frames to OXIDESFC_FRAME_DUMP_DIR for visual inspection"]
+    fn dump_real_rom_frames() {
+        let dir = std::env::var("OXIDESFC_FRAME_DUMP_DIR")
+            .expect("set OXIDESFC_FRAME_DUMP_DIR to a writable directory");
+        let rom = std::env::var("OXIDESFC_FRAME_DUMP_ROM").unwrap_or_else(|_| rom_path_str());
+        let tag = std::env::var("OXIDESFC_FRAME_DUMP_TAG").unwrap_or_else(|_| "rom".into());
+        let last: u32 = std::env::var("OXIDESFC_FRAME_DUMP_LAST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(400);
+        let mut controller = EmulationController::new();
+        controller.load_rom(&rom).expect("ROM must load");
+        controller.start(None).expect("must start");
+        for n in 0..last {
+            controller.step_frames_now(1);
+            if n + 1 == last || (n > 0 && n % (last / 4).max(1) == 0) {
+                let f = controller.get_frame();
+                std::fs::write(
+                    format!("{}/{}_frame{:04}_{}x{}.rgba", dir, tag, n, f.width, f.height),
+                    &f.data,
+                )
+                .expect("write frame");
+            }
+        }
+    }
+
+    #[test]
+    fn real_rom_audio_is_actually_audible_not_just_a_stream_of_zeros() {
+        // `step_frame_produces_real_audio_samples...` only proves samples
+        // arrive; a fully broken synthesis path produces the right COUNT of
+        // silence. This checks the whole audio chain end to end against a real
+        // ROM: the SPC700 boots the IPL ROM, the game's driver uploads and runs,
+        // it programs the DSP, and the DSP synthesizes a signal.
+        //
+        // It is the guard for the SPC700 cycle-accounting change in
+        // `Apu::tick` (instructions now cost their real cycles instead of one
+        // cycle each, cutting SPC700 throughput to ~1/3.5 of what it was): if
+        // that had broken the $AA/$BB/$CC upload handshake or starved the
+        // driver, the machine would still run and still emit 32kHz of perfect
+        // silence, which every other test here would happily accept.
+        let mut controller = EmulationController::new();
+        controller.load_rom(&rom_path_str()).expect("ROM must load");
+        controller.start(None).expect("must be able to start after loading");
+
+        // A few seconds of emulated time: enough for the driver to upload,
+        // start its music, and get past any initial silent fade.
+        let mut loudest = 0i32;
+        let mut nonzero = 0usize;
+        let mut total = 0usize;
+        for _ in 0..600 {
+            controller.step_frames_now(1);
+            for s in controller.get_audio() {
+                total += 1;
+                if s != 0 {
+                    nonzero += 1;
+                }
+                loudest = loudest.max((s as i32).abs());
+            }
+        }
+
+        assert!(
+            total > 100_000,
+            "600 frames must yield roughly 10 seconds of 32kHz stereo samples, got {}",
+            total
+        );
+        assert!(
+            loudest > 512,
+            "the DSP must synthesize an audible signal from the real ROM's own \
+             sound driver, not silence; loudest sample magnitude was {}",
+            loudest
+        );
+        // Sustained sound, not a single click: a healthy music stream has a
+        // large fraction of nonzero samples.
+        let ratio = nonzero as f64 / total as f64;
+        assert!(
+            ratio > 0.10,
+            "audio must be sustained rather than a lone transient; only {:.1}% \
+             of samples were nonzero",
+            ratio * 100.0
         );
     }
 
