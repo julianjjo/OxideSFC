@@ -26,4 +26,7 @@ pub use ppu::{Ppu, PpuMode, PpuRegisters};
 pub use io::IoRegisters;
 pub use apu::Apu;
 pub use dma::Dma;
-pub use renderer::{render_frame, render_frame_per_scanline, SCREEN_HEIGHT, SCREEN_WIDTH};
+pub use renderer::{
+    render_frame, render_frame_per_scanline, render_frame_per_scanline_with_cgram,
+    SCREEN_HEIGHT, SCREEN_WIDTH,
+};
