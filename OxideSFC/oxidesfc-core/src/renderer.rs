@@ -85,6 +85,38 @@ pub fn render_frame_per_scanline_with_status(
     oam: &Oam,
     lines: &[PpuRegisters],
 ) -> (Vec<u8>, u8) {
+    render_lines(vram, oam, lines, |_| cgram)
+}
+
+/// Like `render_frame_per_scanline_with_status`, but with a PER-SCANLINE
+/// CGRAM snapshot as well (`cgram_lines[y]` = the palette in effect on
+/// scanline `y`). Games routinely rewrite palette entries mid-frame via
+/// HDMA to $2121/$2122 -- Prince of Persia 2 repaints backdrop color 0
+/// every line for its sky gradient, then restores it in vblank, so a
+/// single end-of-frame CGRAM paints the whole sky one flat color. A band
+/// split happens wherever the registers OR the palette change.
+pub fn render_frame_per_scanline_with_cgram(
+    vram: &Vram,
+    cgram_lines: &[Cgram],
+    oam: &Oam,
+    lines: &[PpuRegisters],
+) -> (Vec<u8>, u8) {
+    assert_eq!(
+        cgram_lines.len(),
+        SCREEN_HEIGHT,
+        "one CGRAM snapshot per visible scanline is required"
+    );
+    render_lines(vram, oam, lines, |y| &cgram_lines[y])
+}
+
+/// Shared band-splitting core: renders consecutive scanlines as one band
+/// while both the register snapshot and the line's CGRAM stay identical.
+fn render_lines<'a>(
+    vram: &Vram,
+    oam: &Oam,
+    lines: &[PpuRegisters],
+    cgram_for_line: impl Fn(usize) -> &'a Cgram,
+) -> (Vec<u8>, u8) {
     assert_eq!(
         lines.len(),
         SCREEN_HEIGHT,
@@ -97,9 +129,20 @@ pub fn render_frame_per_scanline_with_status(
 
     let mut band_start = 0usize;
     for y in 1..=SCREEN_HEIGHT {
-        if y == SCREEN_HEIGHT || lines[y] != lines[band_start] {
-            range_time_over |=
-                render_band(&mut fb, &mut scratch, band_start, y, vram, cgram, oam, &lines[band_start]);
+        if y == SCREEN_HEIGHT
+            || lines[y] != lines[band_start]
+            || cgram_for_line(y).as_slice() != cgram_for_line(band_start).as_slice()
+        {
+            range_time_over |= render_band(
+                &mut fb,
+                &mut scratch,
+                band_start,
+                y,
+                vram,
+                cgram_for_line(band_start),
+                oam,
+                &lines[band_start],
+            );
             band_start = y;
         }
     }
@@ -1503,6 +1546,44 @@ mod tests {
         let below = (6 * SCREEN_WIDTH) * 4;
         assert_eq!((fb[below], fb[below + 1], fb[below + 2]), backdrop,
             "rows after the split must use the second band's scroll");
+    }
+
+    #[test]
+    fn per_scanline_cgram_renders_each_row_with_its_own_palette() {
+        // Mid-frame palette rewrites are as common as mid-frame register
+        // writes: Prince of Persia 2 HDMAs backdrop color 0 every line
+        // for its sky gradient and restores the palette during vblank,
+        // so rendering every row from one end-of-frame CGRAM flattens
+        // the gradient into a single solid color. Each row must be
+        // composited with the palette captured for ITS scanline.
+        let vram = Vram::new();
+        let oam = Oam::new();
+
+        let mut regs = PpuRegisters::default();
+        regs.inidisp = 0x0F; // full brightness
+        regs.bgmode = 1;
+        regs.tm = 0x00; // backdrop-only frame
+        let lines = vec![regs; SCREEN_HEIGHT];
+
+        let mut sky_top = Cgram::new();
+        sky_top.write_color(0, 0x001F); // red backdrop
+        let mut sky_bottom = Cgram::new();
+        sky_bottom.write_color(0, 0x7C00); // blue backdrop
+
+        let mut cgram_lines = vec![sky_top; SCREEN_HEIGHT];
+        for pal in cgram_lines.iter_mut().skip(100) {
+            *pal = sky_bottom.clone();
+        }
+
+        let (fb, _) =
+            render_frame_per_scanline_with_cgram(&vram, &cgram_lines, &oam, &lines);
+
+        let above = (50 * SCREEN_WIDTH) * 4;
+        assert_eq!((fb[above], fb[above + 1], fb[above + 2]), (255, 0, 0),
+            "rows before the palette change must use their own line's backdrop color");
+        let below = (150 * SCREEN_WIDTH) * 4;
+        assert_eq!((fb[below], fb[below + 1], fb[below + 2]), (0, 0, 255),
+            "rows after the palette change must use the rewritten backdrop color");
     }
 
     #[test]

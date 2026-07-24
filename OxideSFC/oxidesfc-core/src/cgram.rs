@@ -12,6 +12,7 @@
 /// - Bits 4-0: Red (5 bits, 0-31)
 /// - Bit 15: Unused/ignored
 
+#[derive(Clone)]
 pub struct Cgram {
     /// 512 bytes of color data (256 colors × 2 bytes each)
     colors: [u8; 512],

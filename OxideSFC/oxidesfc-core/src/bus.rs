@@ -1,4 +1,5 @@
 use crate::apu::Apu;
+use crate::cgram::Cgram;
 use crate::dma::Dma;
 use crate::error::EmulationError;
 use crate::cartridge::Cartridge;
@@ -155,6 +156,14 @@ pub struct SystemBus {
     /// scroll/color gradients -- show up on the correct rows instead of
     /// the whole frame being painted with one end-of-frame register state.
     scanline_regs: Vec<PpuRegisters>,
+    /// Per-scanline CGRAM snapshots, captured at the same instant as
+    /// `scanline_regs`. Games rewrite palette entries mid-frame via HDMA
+    /// to $2121/$2122 (Prince of Persia 2 repaints backdrop color 0 every
+    /// line for its sky gradient, then restores it during vblank), so
+    /// rendering from one end-of-frame CGRAM would paint every line with
+    /// the vblank palette. Not serialized in save states -- reseeded from
+    /// the live CGRAM on load, like `scanline_regs`.
+    scanline_cgram: Vec<Cgram>,
     /// $4202 WRMPYA: 8-bit multiplicand for the hardware multiplier.
     wrmpya: u8,
     /// $4204/$4205 WRDIVL/WRDIVH: 16-bit dividend for the hardware divider.
@@ -318,6 +327,7 @@ impl SystemBus {
             irq_line: false,
             last_scanline: 0,
             scanline_regs: vec![PpuRegisters::default(); crate::renderer::SCREEN_HEIGHT],
+            scanline_cgram: vec![Cgram::new(); crate::renderer::SCREEN_HEIGHT],
             wrmpya: 0xFF,
             wrdiv: 0xFFFF,
             rddiv: 0,
@@ -447,16 +457,17 @@ impl SystemBus {
         self.joypad2_state = state;
     }
 
-    /// Renders the current VRAM/CGRAM/OAM contents to an RGBA8888
-    /// framebuffer using the PER-SCANLINE register snapshots captured
-    /// during the frame (see `scanline_regs`), so mid-frame register
-    /// changes (SMW's IRQ status-bar split, HDMA scroll/COLDATA effects)
-    /// land on the correct rows. See `crate::renderer` for exactly what
-    /// is and isn't modeled.
+    /// Renders the current VRAM/OAM contents to an RGBA8888 framebuffer
+    /// using the PER-SCANLINE register and CGRAM snapshots captured
+    /// during the frame (see `scanline_regs`/`scanline_cgram`), so
+    /// mid-frame register changes (SMW's IRQ status-bar split, HDMA
+    /// scroll/COLDATA effects) and mid-frame palette rewrites (PoP2's
+    /// HDMA sky gradient on backdrop color 0) land on the correct rows.
+    /// See `crate::renderer` for exactly what is and isn't modeled.
     pub fn render_frame(&mut self) -> Vec<u8> {
-        let (frame, range_time_over) = crate::renderer::render_frame_per_scanline_with_status(
+        let (frame, range_time_over) = crate::renderer::render_frame_per_scanline_with_cgram(
             self.ppu.vram_ref(),
-            self.ppu.cgram_ref(),
+            &self.scanline_cgram,
             self.ppu.oam_ref(),
             &self.scanline_regs,
         );
@@ -630,6 +641,9 @@ impl SystemBus {
             self.refresh_charged_this_line = false;
             if (line as usize) < self.scanline_regs.len() {
                 self.scanline_regs[line as usize] = self.ppu_regs;
+                self.scanline_cgram[line as usize]
+                    .as_mut_slice()
+                    .copy_from_slice(self.ppu.cgram_ref().as_slice());
             }
             // HDMA frame init happens on hardware's line V=0 -- the LAST
             // internal scanline, one line before the first visible one
@@ -1376,9 +1390,12 @@ impl SystemBus {
             }
         }
         // The per-scanline snapshots aren't serialized; seed every line
-        // with the restored register state (they re-capture as the next
-        // frame's scanlines are ticked).
+        // with the restored register state and palette (they re-capture
+        // as the next frame's scanlines are ticked).
         self.scanline_regs.fill(self.ppu_regs);
+        for snap in &mut self.scanline_cgram {
+            snap.as_mut_slice().copy_from_slice(self.ppu.cgram_ref().as_slice());
+        }
         Ok(())
     }
 
@@ -4223,5 +4240,67 @@ mod tests {
         bus.write_u8(0x00420B, 0x01).unwrap(); // trigger channel 0
         assert_eq!(bus.read_u8(0x7E6000).unwrap(), 0xAA);
         assert_eq!(bus.read_u8(0x7E6001).unwrap(), 0xBB);
+    }
+
+    #[test]
+    fn hdma_palette_rewrite_renders_per_line_despite_vblank_restore() {
+        // Prince of Persia 2's sky gradient: an HDMA channel with B-bus
+        // $21 in mode 3 ($2121,$2121,$2122,$2122) rewrites CGRAM color 0
+        // during the visible frame, and the game's NMI handler restores
+        // the palette in vblank. Rendering from a single shared CGRAM
+        // painted every row with the vblank value -- a flat sky and a
+        // wrong status-bar backdrop. The per-scanline CGRAM snapshots
+        // must preserve each row's mid-frame color.
+        let mut bus = SystemBus::new();
+        bus.write_u8(0x002100, 0x0F).unwrap(); // full brightness, screen on
+        // Default regs leave every layer off (TM=0): backdrop-only frame.
+
+        // Direct-mode HDMA table in WRAM at $7E:2000. Non-repeat entries
+        // transfer once then hold: lines 0-95 red, lines 96-191 blue.
+        let table: [u8; 11] = [
+            0x60, 0x00, 0x00, 0x1F, 0x00, // 96 lines: CGADD=0, color=$001F
+            0x60, 0x00, 0x00, 0x00, 0x7C, // 96 lines: CGADD=0, color=$7C00
+            0x00, // end of table
+        ];
+        for (i, &b) in table.iter().enumerate() {
+            bus.write_u8(0x7E2000 + i as u32, b).unwrap();
+        }
+        bus.write_u8(0x004320, 0x03).unwrap(); // DMAP2: direct table, mode 3
+        bus.write_u8(0x004321, 0x21).unwrap(); // BBAD2: $2121
+        bus.write_u8(0x004322, 0x00).unwrap(); // A1T2L
+        bus.write_u8(0x004323, 0x20).unwrap(); // A1T2H
+        bus.write_u8(0x004324, 0x7E).unwrap(); // A1B2
+        bus.write_u8(0x00420C, 0x04).unwrap(); // HDMAEN: channel 2
+
+        // Tick two full frames (so HDMA init has run at a frame boundary
+        // and a complete visible frame was captured with the gradient),
+        // then park inside vblank.
+        let master_per_line = 341 * 4;
+        let lines_per_frame = bus.ppu_ref().scanlines_per_frame() as u32;
+        for _ in 0..(2 * lines_per_frame + 230) {
+            bus.tick_master(master_per_line);
+        }
+        assert!(bus.ppu_ref().in_vblank(), "test setup: should be parked in vblank");
+
+        // The game's vblank palette restore. This lands in the live CGRAM
+        // only -- the visible rows were already captured.
+        bus.write_u8(0x002121, 0x00).unwrap();
+        bus.write_u8(0x002122, 0x4C).unwrap();
+        bus.write_u8(0x002122, 0x3D).unwrap();
+
+        let fb = bus.render_frame();
+        let w = crate::renderer::SCREEN_WIDTH;
+        let top = (10 * w + 100) * 4;
+        assert_eq!(
+            (fb[top], fb[top + 1], fb[top + 2]),
+            (255, 0, 0),
+            "rows covered by the first HDMA entry must keep its color, not the vblank restore"
+        );
+        let bottom = (150 * w + 100) * 4;
+        assert_eq!(
+            (fb[bottom], fb[bottom + 1], fb[bottom + 2]),
+            (0, 0, 255),
+            "rows covered by the second HDMA entry must keep its color, not the vblank restore"
+        );
     }
 }
