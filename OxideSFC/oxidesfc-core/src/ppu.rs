@@ -308,8 +308,13 @@ pub struct Ppu {
     
     /// PPU mode (NTSC or PAL)
     mode: PpuMode,
-    /// Whether the frame was just completed (for is_frame_ready)
+    /// Whether the finished picture is ready to be displayed -- latched on
+    /// the vblank-entry edge (see `tick`).
     frame_ready: bool,
+    /// Whether `frame_ready` has already been latched for the frame in
+    /// progress, so the vblank-entry edge fires exactly once even if
+    /// `visible_scanlines` changes mid-frame (an overscan toggle).
+    frame_ready_latched: bool,
     /// Interlace field flag, toggled every frame (STAT78 bit 7). In
     /// interlaced modes the two fields carry the odd/even half-lines.
     field: bool,
@@ -336,6 +341,7 @@ impl Ppu {
             frame: 0,
             mode,
             frame_ready: false,
+            frame_ready_latched: false,
             field: false,
             overscan: false,
         }
@@ -385,22 +391,48 @@ impl Ppu {
     // ==================== Timing ====================
 
     /// Advances the PPU by one pixel (tick)
-    /// 
+    ///
     /// This increments the h_counter and handles scanline wrapping.
-    /// At the end of each frame, frame_ready is set to true.
+    /// `frame_ready` is latched on the vblank-entry edge.
+    ///
+    /// It used to be latched at the end of the *frame* instead, i.e. after
+    /// the whole vblank had run. Because the frontend renders as soon as
+    /// this flag appears (`Snes::step_until_frame_ready`), and because
+    /// `SystemBus::render_frame` reads VRAM and OAM live rather than from
+    /// per-scanline snapshots, that handed the renderer the tile and sprite
+    /// data the game had just uploaded *during that vblank for the NEXT
+    /// frame*, while the per-scanline register snapshots still described the
+    /// frame just finished. Every scrolling game therefore drew its sprites
+    /// one frame of camera motion away from its backgrounds, and the tilemap
+    /// column freshly DMA'd for the upcoming scroll appeared against the old
+    /// scroll position as a wrong column of tiles at the screen edge. It
+    /// also meant the tick that set the flag had already overwritten
+    /// `scanline_regs[0]` with post-vblank state, so the top line of every
+    /// frame rendered with the next frame's registers.
+    ///
+    /// Latching at vblank entry instead means the picture is rendered from
+    /// the VRAM/OAM/register state that was actually live while it was being
+    /// scanned out -- and it is the same edge on which hardware raises NMI,
+    /// so a game's vblank uploads land after the frame they follow.
     pub fn tick(&mut self) {
         self.h_counter += 1;
-        
+
         // Check for end of scanline
         if self.h_counter >= Self::pixels_per_line() {
             self.h_counter = 0;
             self.scanline += 1;
-            
+
+            // Vblank entry: the visible picture is complete.
+            if !self.frame_ready_latched && self.scanline >= self.visible_scanlines() {
+                self.frame_ready_latched = true;
+                self.frame_ready = true;
+            }
+
             // Check for end of frame
             if self.scanline >= self.scanlines_per_frame() {
                 self.scanline = 0;
                 self.frame += 1;
-                self.frame_ready = true;
+                self.frame_ready_latched = false;
                 self.field = !self.field; // interlace fields alternate per frame
             }
         }
@@ -553,6 +585,7 @@ impl Ppu {
             PpuMode::Pal => 1,
         });
         put_bool(out, self.frame_ready);
+        put_bool(out, self.frame_ready_latched);
         put_bool(out, self.field);
         put_bool(out, self.overscan);
     }
@@ -573,6 +606,7 @@ impl Ppu {
         self.frame = r.u32()?;
         self.mode = if r.u8()? == 1 { PpuMode::Pal } else { PpuMode::Ntsc };
         self.frame_ready = r.bool()?;
+        self.frame_ready_latched = r.bool()?;
         self.field = r.bool()?;
         self.overscan = r.bool()?;
         Ok(())
@@ -586,6 +620,7 @@ impl Ppu {
         self.h_counter = 0;
         self.frame = 0;
         self.frame_ready = false;
+        self.frame_ready_latched = false;
         self.field = false;
         self.vram.clear();
         self.cgram.clear();
@@ -684,6 +719,47 @@ mod tests {
         assert_eq!(ppu.h_counter(), 0);
         assert_eq!(ppu.frame(), 1);
         assert!(ppu.is_frame_ready());
+    }
+
+    #[test]
+    fn frame_ready_latches_on_vblank_entry_not_at_the_frame_wrap() {
+        // The frontend renders as soon as this flag appears, and
+        // `SystemBus::render_frame` reads VRAM/OAM live. Latching at the
+        // frame wrap therefore rendered with the tile and sprite data the
+        // game uploaded during that vblank for the NEXT frame -- see
+        // `Ppu::tick`.
+        let mut ppu = Ppu::new();
+
+        // One dot short of entering vblank: nothing ready yet.
+        for _ in 0..(224 * Ppu::pixels_per_line() as u32 - 1) {
+            ppu.tick();
+        }
+        assert!(!ppu.is_frame_ready(), "the picture is still being scanned out");
+
+        ppu.tick();
+        assert_eq!(ppu.scanline(), 224, "sanity: line 224 is NTSC vblank entry");
+        assert!(
+            ppu.is_frame_ready(),
+            "the finished picture must be ready at vblank entry"
+        );
+
+        // The latch must fire exactly once per frame: nothing re-latches
+        // through the rest of vblank, including the wrap itself.
+        ppu.clear_frame_ready();
+        for _ in 0..((262 - 224) * Ppu::pixels_per_line() as u32) {
+            ppu.tick();
+        }
+        assert_eq!(ppu.scanline(), 0, "sanity: back at the top of the frame");
+        assert!(
+            !ppu.is_frame_ready(),
+            "the frame wrap must not latch a second frame"
+        );
+
+        // And the next frame's vblank entry latches again.
+        for _ in 0..(224 * Ppu::pixels_per_line() as u32) {
+            ppu.tick();
+        }
+        assert!(ppu.is_frame_ready(), "the following frame must latch too");
     }
 
     #[test]

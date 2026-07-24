@@ -23,7 +23,7 @@ export function AudioSettings() {
   const [masterVolume, setMasterVolume] = useState(Math.round((audio.volume || 1) * 100));
   const [sfxVolume, setSfxVolume] = useState(audio.sfx_volume ?? 100);
   const [musicVolume, setMusicVolume] = useState(audio.music_volume ?? 100);
-  const [latency, setLatency] = useState(audio.latency || 50);
+  const [latency, setLatency] = useState(audio.latency || 60);
   const [enableBuffering, setEnableBuffering] = useState(audio.buffering_enabled ?? true);
 
   // Update local state when settings load

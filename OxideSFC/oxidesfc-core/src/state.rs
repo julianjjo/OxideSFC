@@ -7,7 +7,10 @@ use crate::error::EmulationError;
 
 /// Magic + version prefix for whole-machine snapshots.
 const SNAPSHOT_MAGIC: &[u8; 4] = b"OXSF";
-const SNAPSHOT_VERSION: u16 = 3;
+/// Bumped to 4 when the DSP gained its noise-LFSR field (`Dsp::noise`),
+/// which changed the APU section's byte layout. Version-3 states are
+/// cleanly rejected rather than silently misparsed.
+const SNAPSHOT_VERSION: u16 = 4;
 
 /// Serializes the whole machine (CPU + everything `SystemBus` owns) into
 /// a versioned byte buffer. The ROM itself is not included -- a snapshot

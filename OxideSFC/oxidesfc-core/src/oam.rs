@@ -7,8 +7,8 @@
 /// Total: 544 bytes
 /// 
 /// Each sprite entry is 4 bytes:
-/// - Byte 0: Y position (0-255, 256 means sprite is off-screen)
-/// - Byte 1: X position (0-255, 256-512 for extended range)
+/// - Byte 0: X position (low 8 bits; bit 8 lives in the secondary table)
+/// - Byte 1: Y position (0-255, wrapping -- see `renderer::evaluate_sprites`)
 /// - Byte 2: Tile number (low 8 bits; bit 8 lives in byte 3, bit 0)
 /// - Byte 3: Attributes, real hardware layout `vhoopppN`:
 ///   - Bit 7: Vertical flip
@@ -68,42 +68,47 @@ impl Oam {
     /// * `sprite_idx` - Sprite index (0-127)
     /// 
     /// # Returns
-    /// Y position (0-255, 256 = off-screen)
+    /// Y position (0-255)
+    ///
+    /// Byte 1 of the entry, not byte 0: these accessors used to have X and Y
+    /// swapped -- the opposite of the real layout the renderer decodes and of
+    /// this module's own doc comment. Nothing outside these tests called them,
+    /// but any future caller would have silently transposed every sprite.
     pub fn get_y(&self, sprite_idx: u8) -> u8 {
         let idx = (sprite_idx as usize) & 0x7F; // Max 128 sprites
-        self.data[idx * 4]
+        self.data[idx * 4 + 1]
     }
 
     /// Sets the Y position of a sprite
-    /// 
+    ///
     /// # Arguments
     /// * `sprite_idx` - Sprite index (0-127)
     /// * `y` - Y position (0-255)
     pub fn set_y(&mut self, sprite_idx: u8, y: u8) {
         let idx = (sprite_idx as usize) & 0x7F;
-        self.data[idx * 4] = y;
+        self.data[idx * 4 + 1] = y;
     }
 
     /// Gets the X position of a sprite
-    /// 
+    ///
     /// # Arguments
     /// * `sprite_idx` - Sprite index (0-127)
-    /// 
+    ///
     /// # Returns
-    /// X position (0-255, 256-512 for extended range)
+    /// X position, low 8 bits (bit 8 lives in the secondary table)
     pub fn get_x(&self, sprite_idx: u8) -> u8 {
         let idx = (sprite_idx as usize) & 0x7F;
-        self.data[idx * 4 + 1]
+        self.data[idx * 4]
     }
 
     /// Sets the X position of a sprite
-    /// 
+    ///
     /// # Arguments
     /// * `sprite_idx` - Sprite index (0-127)
     /// * `x` - X position (0-255)
     pub fn set_x(&mut self, sprite_idx: u8, x: u8) {
         let idx = (sprite_idx as usize) & 0x7F;
-        self.data[idx * 4 + 1] = x;
+        self.data[idx * 4] = x;
     }
 
     /// Gets the tile number of a sprite
@@ -462,14 +467,15 @@ mod tests {
         // 0..544 unless explicitly wrapped there -- so a raw bitmask could
         // alias high sprite indices back onto low ones.
         //
-        // Sprite 8's Y-coordinate byte lives at raw OAM offset 8 * 4 = 32.
-        // Confirm writing there does not disturb sprite 0's Y byte at
-        // offset 0, and that both are independently addressable all the
-        // way up through sprite 127 (offset 127 * 4 = 508).
+        // Sprite 8's entry starts at raw OAM offset 8 * 4 = 32 (X byte, with
+        // Y at 33 -- see the module doc comment). Confirm writing there does
+        // not disturb sprite 0's entry at offset 0, and that both are
+        // independently addressable all the way up through sprite 127
+        // (offset 127 * 4 = 508).
         let mut oam = Oam::new();
 
-        oam.write(0, 0xAA); // sprite 0's Y byte
-        oam.write(32, 0xBB); // sprite 8's Y byte
+        oam.write(0, 0xAA); // sprite 0's X byte
+        oam.write(32, 0xBB); // sprite 8's X byte
         assert_eq!(oam.read(0), 0xAA);
         assert_eq!(oam.read(32), 0xBB);
         assert_ne!(oam.read(32), oam.read(0));
@@ -494,12 +500,12 @@ mod tests {
         // address past the halfway point must still land in-range and
         // wrap correctly at 544, not alias back onto sprite 0..7 via a
         // power-of-two bitmask.
-        let word_addr: u16 = 16; // word address for sprite 8's Y/X pair
-        let byte_addr = word_addr.wrapping_mul(2); // = 32, sprite 8's Y byte
+        let word_addr: u16 = 16; // word address for sprite 8's X/Y pair
+        let byte_addr = word_addr.wrapping_mul(2); // = 32, sprite 8's X byte
         assert_eq!(byte_addr, 32);
         oam.write(byte_addr, 0x44);
         assert_eq!(oam.read(32), 0x44);
-        assert_eq!(oam.read(0), 0x11); // sprite 0 untouched
+        assert_eq!(oam.read(1), 0x11); // sprite 0's Y (set above) untouched
     }
 
     #[test]

@@ -524,6 +524,21 @@ impl SystemBus {
         &mut self.ppu
     }
 
+    /// Selects the machine's video standard, keeping every clock that
+    /// depends on it consistent: the PPU's line count and vblank position,
+    /// and the master clock the APU converts its pacing units against.
+    ///
+    /// Prefer this over `ppu_mut().set_mode()`, which changes only the PPU
+    /// and would leave the APU converting against the other standard's
+    /// master clock -- a ~0.9% error in the generated sample rate.
+    pub fn set_video_mode(&mut self, mode: crate::ppu::PpuMode) {
+        self.ppu.set_mode(mode);
+        self.apu.set_master_clock_hz(match mode {
+            crate::ppu::PpuMode::Ntsc => crate::apu::NTSC_MASTER_CLOCK_HZ,
+            crate::ppu::PpuMode::Pal => crate::apu::PAL_MASTER_CLOCK_HZ,
+        });
+    }
+
     /// Read-only access to the DMA controller (e.g. for diagnostics or
     /// tests checking real transfer-state flags like `is_active()`/
     /// `check_done()`/`hdma_pending()`/`is_enabled()` -- see

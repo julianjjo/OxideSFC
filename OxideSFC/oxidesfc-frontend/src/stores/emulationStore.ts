@@ -78,13 +78,17 @@ interface EmulationState {
 // result is discarded instead of clobbering state set by the newer call.
 let opSeq = 0;
 
+/// Shared empty buffer used to mark "nothing new to play", so the render loop
+/// never re-queues a previous poll's samples. See `getFrame`.
+const EMPTY_AUDIO = new Int16Array(0);
+
 export const useEmulationStore = create<EmulationState>((set) => ({
   isRunning: false,
   isPaused: false,
   currentGame: null,
   frameRate: 60,
   frame: null,
-  audioBuffer: new Int16Array(0),
+  audioBuffer: EMPTY_AUDIO,
 
   loadRom: async (path: string) => {
     try {
@@ -166,7 +170,17 @@ export const useEmulationStore = create<EmulationState>((set) => ({
       // Discard stale responses: if a newer getFrame (or start/pause/resume/
       // stop) call has been issued before this one's invokes resolved,
       // applying this result would clobber state with an older frame.
-      if (seq !== opSeq) return;
+      //
+      // The stored audioBuffer has to be cleared on the way out, though. The
+      // render loop queues whatever it finds in the store, so leaving the
+      // previous call's buffer in place made that audio play a SECOND time --
+      // an audible repeated ~16ms chunk on every superseded poll, on top of
+      // the gap left by this response's (already drained, now discarded)
+      // samples. Same reasoning on the error path below.
+      if (seq !== opSeq) {
+        set({ audioBuffer: EMPTY_AUDIO });
+        return;
+      }
       const audioBuffer = new Int16Array(audioBytes);
       if (raw) {
         const frame: VideoFrame = {
@@ -180,6 +194,7 @@ export const useEmulationStore = create<EmulationState>((set) => ({
       }
     } catch (error) {
       console.error('Failed to get frame:', error);
+      set({ audioBuffer: EMPTY_AUDIO });
     }
   },
 

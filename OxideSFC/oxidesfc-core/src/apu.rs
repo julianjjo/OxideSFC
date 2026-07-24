@@ -210,9 +210,14 @@ impl Spc700 {
         }
     }
 
-    /// Advances the timer hardware by one SPC700 instruction-step. See the
-    /// `timer_*` fields' doc comment for the verified behavior being
-    /// modeled.
+    /// Advances the timer hardware by one SPC700 *cycle*. See the `timer_*`
+    /// fields' doc comment for the verified behavior being modeled.
+    ///
+    /// `Apu::tick` calls this once per cycle an executed instruction
+    /// consumed. It used to be driven from `step()` instead, i.e. once per
+    /// instruction -- which only kept the timers at their real 8kHz/64kHz
+    /// rates because the caller also (incorrectly) ran exactly one
+    /// instruction per SPC700 cycle.
     fn tick_timers(&mut self) {
         for i in 0..3 {
             if !self.timer_enable[i] {
@@ -353,12 +358,14 @@ impl Spc700 {
         self.psw.n = (value & 0x80) != 0;
     }
 
-    /// Execute one instruction
+    /// Execute one instruction, returning the number of SPC700 cycles it
+    /// consumed. The caller is responsible for advancing the timers by that
+    /// many cycles (see `Apu::tick`) -- this used to tick them itself, once
+    /// per instruction rather than once per cycle.
     pub fn step(&mut self) -> u32 {
         if self.halted.is_some() {
             return 2;
         }
-        self.tick_timers();
         let opcode = self.read_mem(self.pc);
         self.pc = self.pc.wrapping_add(1);
 
@@ -1610,12 +1617,14 @@ impl BrrDecoder {
         let _end_flag = (header & 0x01) != 0;
 
         for i in 0..16 {
-            // Each byte contains 2 4-bit samples (nibble)
-            let nibble = if i < 8 {
-                data[i] & 0x0F
-            } else {
-                (data[i - 8] >> 4) & 0x0F
-            };
+            // Each byte holds two samples played high nibble first, low
+            // nibble second (H0,L0,H1,L1,... per fullsnes and bsnes's
+            // decode_brr). An earlier version emitted all 8 low nibbles
+            // then all 8 high nibbles, time-scrambling every 16-sample
+            // block and running the prediction-filter history in the
+            // wrong order.
+            let byte = data[i >> 1];
+            let nibble = if i & 1 == 0 { (byte >> 4) & 0x0F } else { byte & 0x0F };
 
             // Sign-extend 4-bit to i32.
             let mut s: i32 = if nibble >= 8 { (nibble as i32) - 16 } else { nibble as i32 };
@@ -1667,6 +1676,64 @@ impl Default for BrrDecoder {
     }
 }
 
+/// Saturate to the signed 16-bit range, the DSP's native accumulator
+/// width. Real hardware saturates after *each* accumulation step, not only
+/// at the end of the mix -- see `Dsp::sample`.
+#[inline]
+fn clamp16(v: i32) -> i32 {
+    v.clamp(-32768, 32767)
+}
+
+/// The SNES DSP's 512-entry gaussian interpolation table, transcribed from
+/// bsnes' `SPC_DSP.cpp` (`gauss`).
+///
+/// This is the real hardware kernel used to resample BRR samples to the
+/// output rate, and it is a deliberately *lowpassing* filter -- BRR content
+/// was authored expecting it. `Voice::sample` previously used Catmull-Rom
+/// cubic interpolation as a stand-in, which is a brighter kernel: it passes
+/// the BRR quantization noise the gaussian rolls off, and overshoots, so
+/// every sampled instrument came out harsher and grainier than on hardware
+/// (audibly "not the same quality as bsnes").
+///
+/// The table is not perfectly normalized -- the four taps a given offset
+/// selects sum to 2048 +/- 1, matching hardware's rounding, which
+/// `gauss_table_matches_hardware_shape` pins along with the classic
+/// offset-0 quadruple (370, 1305, 374, 0).
+const GAUSS: [i16; 512] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
+    2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5,
+    6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10,
+    11, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 15, 16, 16, 17, 17,
+    18, 19, 19, 20, 20, 21, 21, 22, 23, 23, 24, 24, 25, 26, 27, 27,
+    28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 36, 36, 37, 38, 39, 40,
+    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+    58, 59, 60, 61, 62, 64, 65, 66, 67, 69, 70, 71, 73, 74, 76, 77,
+    78, 80, 81, 83, 84, 86, 87, 89, 90, 92, 94, 95, 97, 99, 100, 102,
+    104, 106, 107, 109, 111, 113, 115, 117, 118, 120, 122, 124, 126, 128, 130, 132,
+    134, 137, 139, 141, 143, 145, 147, 150, 152, 154, 156, 159, 161, 163, 166, 168,
+    171, 173, 175, 178, 180, 183, 186, 188, 191, 193, 196, 199, 201, 204, 207, 210,
+    212, 215, 218, 221, 224, 227, 230, 233, 236, 239, 242, 245, 248, 251, 254, 257,
+    260, 263, 267, 270, 273, 276, 280, 283, 286, 290, 293, 297, 300, 304, 307, 311,
+    314, 318, 321, 325, 328, 332, 336, 339, 343, 347, 351, 354, 358, 362, 366, 370,
+    374, 378, 381, 385, 389, 393, 397, 401, 405, 410, 414, 418, 422, 426, 430, 434,
+    439, 443, 447, 451, 456, 460, 464, 469, 473, 477, 482, 486, 491, 495, 499, 504,
+    508, 513, 517, 522, 527, 531, 536, 540, 545, 550, 554, 559, 563, 568, 573, 577,
+    582, 587, 592, 596, 601, 606, 611, 615, 620, 625, 630, 635, 640, 644, 649, 654,
+    659, 664, 669, 674, 678, 683, 688, 693, 698, 703, 708, 713, 718, 723, 728, 732,
+    737, 742, 747, 752, 757, 762, 767, 772, 777, 782, 787, 792, 797, 802, 806, 811,
+    816, 821, 826, 831, 836, 841, 846, 851, 855, 860, 865, 870, 875, 880, 884, 889,
+    894, 899, 904, 908, 913, 918, 923, 927, 932, 937, 941, 946, 951, 955, 960, 965,
+    969, 974, 978, 983, 988, 992, 997, 1001, 1005, 1010, 1014, 1019, 1023, 1027, 1032, 1036,
+    1040, 1045, 1049, 1053, 1057, 1061, 1066, 1070, 1074, 1078, 1082, 1086, 1090, 1094, 1098, 1102,
+    1106, 1109, 1113, 1117, 1121, 1125, 1128, 1132, 1136, 1139, 1143, 1146, 1150, 1153, 1157, 1160,
+    1164, 1167, 1170, 1174, 1177, 1180, 1183, 1186, 1190, 1193, 1196, 1199, 1202, 1205, 1207, 1210,
+    1213, 1216, 1219, 1221, 1224, 1227, 1229, 1232, 1234, 1237, 1239, 1241, 1244, 1246, 1248, 1251,
+    1253, 1255, 1257, 1259, 1261, 1263, 1265, 1267, 1269, 1270, 1272, 1274, 1275, 1277, 1279, 1280,
+    1282, 1283, 1284, 1286, 1287, 1288, 1290, 1291, 1292, 1293, 1294, 1295, 1296, 1297, 1297, 1298,
+    1299, 1300, 1300, 1301, 1302, 1302, 1303, 1303, 1303, 1304, 1304, 1304, 1304, 1304, 1305, 1305,
+];
+
 /// A single voice channel.
 ///
 /// This holds only genuine per-voice *state*; all configuration (volume,
@@ -1700,12 +1767,8 @@ pub struct Voice {
     /// advances one sample, so PITCH=0x1000 plays at the native ~32kHz.
     pub pitch_counter: u16,
     /// The last four decoded source samples (oldest first), fed to the
-    /// 4-point resampling interpolator. Real hardware runs a 4-tap
-    /// gaussian filter here; we use Catmull-Rom cubic interpolation as a
-    /// close stand-in -- the point is that ANY 4-point kernel removes the
-    /// harsh zipper/aliasing noise the previous nearest-neighbor
-    /// resampling produced on every non-native-pitch note (i.e. nearly
-    /// all of them), which read as "sound plays but is not clear".
+    /// 4-point resampling interpolator -- real hardware's 4-tap gaussian
+    /// filter, using the hardware kernel in `GAUSS`.
     pub hist: [i32; 4],
     pub active: bool,
     /// Set by `key_on`; the sample-directory lookup that resolves the
@@ -1777,6 +1840,16 @@ impl Voice {
     /// `pitch` = $x2/$x3 as a 14-bit value, `srcn` = $x4, `adsr1`/`adsr2`
     /// = $x5/$x6, `gain` = $x7) plus the sample-directory page (`dir` =
     /// $5D) and the DSP's global envelope `counter`.
+    ///
+    /// `use_noise` is this voice's NON ($3D) bit: when set, the voice's
+    /// source is the DSP's shared noise LFSR (`noise`) instead of its BRR
+    /// sample, exactly as on hardware. BRR playback still advances
+    /// underneath, so clearing NON resumes the sample where it would have
+    /// been.
+    ///
+    /// Returns `(left, right, enveloped)`, where `enveloped` is the
+    /// post-envelope, pre-volume output that hardware feeds to the next
+    /// voice's pitch modulation and to this voice's OUTX register.
     pub fn sample(
         &mut self,
         ram: &[u8; 65536],
@@ -1789,7 +1862,9 @@ impl Voice {
         gain: u8,
         dir: u8,
         counter: u32,
-    ) -> (i32, i32) {
+        use_noise: bool,
+        noise: i32,
+    ) -> (i32, i32, i32) {
         // Resolve start/loop addresses from the sample directory on the
         // first sample after key-on. The directory lives at page `dir<<8`;
         // each source number selects a 4-byte entry (start lo/hi, loop
@@ -1811,7 +1886,7 @@ impl Voice {
         if !self.active {
             self.output_left = 0;
             self.output_right = 0;
-            return (0, 0);
+            return (0, 0, 0);
         }
 
         // Advance the BRR read position by pitch (PITCH=0x1000 => native
@@ -1843,7 +1918,7 @@ impl Voice {
                         self.adsr.level = 0;
                         self.output_left = 0;
                         self.output_right = 0;
-                        return (0, 0);
+                        return (0, 0, 0);
                     }
                 } else {
                     self.brr_addr = self.brr_addr.wrapping_add(9);
@@ -1892,30 +1967,38 @@ impl Voice {
             self.active = false;
             self.output_left = 0;
             self.output_right = 0;
-            return (0, 0);
+            return (0, 0, 0);
         }
 
-        // 4-point Catmull-Rom interpolation between hist[1] and hist[2]
-        // at the fractional pitch position (see `hist`'s doc comment).
-        let brr_sample = {
-            let t = (self.pitch_counter as f32) * (1.0 / 4096.0);
-            let p0 = self.hist[0] as f32;
-            let p1 = self.hist[1] as f32;
-            let p2 = self.hist[2] as f32;
-            let p3 = self.hist[3] as f32;
-            let a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
-            let b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
-            let c = -0.5 * p0 + 0.5 * p2;
-            let out = ((a * t + b) * t + c) * t + p1;
-            (out as i32).clamp(-32768, 32767)
+        // 4-point gaussian interpolation, the real hardware kernel (see
+        // `GAUSS`). The top 8 bits of the 12-bit fractional pitch position
+        // select the tap set; each tap is scaled >> 11, and the third
+        // accumulation is truncated to 16 bits *before* the fourth tap is
+        // added -- a genuine hardware quirk (bsnes `SPC_DSP::interpolate`
+        // does the same `(int16_t)` narrowing mid-sum), not an accident.
+        let brr_sample = if use_noise {
+            // NON: the shared noise LFSR replaces the sample source.
+            (noise * 2) as i16 as i32
+        } else {
+            let offset = ((self.pitch_counter >> 4) & 0xFF) as usize;
+            let fwd = 255 - offset;
+            let rev = offset;
+            let mut out = (GAUSS[fwd] as i32 * self.hist[0]) >> 11;
+            out += (GAUSS[fwd + 256] as i32 * self.hist[1]) >> 11;
+            out += (GAUSS[rev + 256] as i32 * self.hist[2]) >> 11;
+            out = out as i16 as i32;
+            out += (GAUSS[rev] as i32 * self.hist[3]) >> 11;
+            // Hardware clears the low bit of the interpolated result.
+            clamp16(out) & !1
         };
-        // Envelope is 11-bit, so >> 11 to scale.
-        let enveloped = (brr_sample * env) >> 11;
+        // Envelope is 11-bit, so >> 11 to scale. Hardware also clears the
+        // low bit of the post-envelope value.
+        let enveloped = ((brr_sample * env) >> 11) & !1;
 
         // Per-voice volume is a signed 8-bit value; >> 7 normalizes it.
         self.output_left = (enveloped * (vol_l as i32)) >> 7;
         self.output_right = (enveloped * (vol_r as i32)) >> 7;
-        (self.output_left, self.output_right)
+        (self.output_left, self.output_right, enveloped)
     }
 }
 
@@ -1969,6 +2052,15 @@ pub struct Dsp {
     /// it to decide, per rate, which samples an envelope advances on --
     /// see `Adsr::run`.
     counter: i32,
+
+    /// The DSP's shared 15-bit noise LFSR, clocked at the rate in FLG
+    /// ($6C) bits 0-4 and used as the sample source by every voice whose
+    /// NON ($3D) bit is set. Previously absent entirely: NON-flagged voices
+    /// played their (usually meaningless) BRR sample instead, so
+    /// percussion -- hi-hats, snares, cymbals -- and noise-based SFX (wind,
+    /// rain, explosions, engine hum) were wrong or silent in a large part
+    /// of the library. Seeded to 0x4000 like hardware after reset.
+    noise: i32,
 }
 
 impl Dsp {
@@ -1983,6 +2075,7 @@ impl Dsp {
             output_left: 0,
             output_right: 0,
             counter: 0,
+            noise: 0x4000,
         }
     }
 
@@ -1998,6 +2091,7 @@ impl Dsp {
         self.output_left = 0;
         self.output_right = 0;
         self.counter = 0;
+        self.noise = 0x4000;
     }
 
     /// Serializes the COMPLETE DSP: the 128-byte register file plus all
@@ -2055,6 +2149,7 @@ impl Dsp {
         put_u16(out, self.output_left as u16);
         put_u16(out, self.output_right as u16);
         put_i32(out, self.counter);
+        put_i32(out, self.noise);
     }
 
     /// Restores state produced by `save_state`.
@@ -2105,7 +2200,12 @@ impl Dsp {
                 Ok((r.i32()?, r.i32()?))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.echo_pos = (r.u32()? as usize).min(self.echo_ring.len().saturating_sub(1));
+        // `sample()` indexes the ring unconditionally, so a zero-length
+        // ring (only reachable from a corrupt state) must not survive.
+        if self.echo_ring.is_empty() {
+            self.echo_ring.push((0, 0));
+        }
+        self.echo_pos = (r.u32()? as usize).min(self.echo_ring.len() - 1);
         for h in self.fir_hist.iter_mut() {
             *h = (r.i32()?, r.i32()?);
         }
@@ -2113,6 +2213,7 @@ impl Dsp {
         self.output_left = r.u16()? as i16;
         self.output_right = r.u16()? as i16;
         self.counter = r.i32()?;
+        self.noise = r.i32()?;
         Ok(())
     }
 
@@ -2188,6 +2289,19 @@ impl Dsp {
                     }
                 }
             }
+            0x6C => {
+                // FLG bit 7 is a DSP soft reset: hardware key-offs every
+                // voice and re-seeds the noise LFSR. Sound drivers set it
+                // while swapping sample banks, and without this the old
+                // voices kept playing against the new bank's data.
+                if value & 0x80 != 0 {
+                    for voice in &mut self.voices {
+                        voice.key_off();
+                        voice.adsr.level = 0;
+                    }
+                    self.noise = 0x4000;
+                }
+            }
             0x7C => {
                 // ENDX -- real hardware: writing ANY value clears every
                 // bit, both in the per-voice latches this aggregates from
@@ -2214,34 +2328,72 @@ impl Dsp {
         }
         let counter = self.counter as u32;
         let dir = self.regs[0x5D];
+        let flg = self.regs[0x6C];
+
+        // Clock the shared noise LFSR at the rate in FLG bits 0-4, using
+        // the same per-rate counter gating as the envelopes (bsnes
+        // `SPC_DSP::run_counters` / the noise block in `echo_22`).
+        if read_counter(counter, (flg & 0x1F) as usize) == 0 {
+            let feedback = (self.noise << 13) ^ (self.noise << 14);
+            self.noise = (feedback & 0x4000) ^ (self.noise >> 1);
+        }
 
         // Mix all voices, reading each one's live configuration from its
         // register block ($n0-$n7). Voices whose EON ($4D) bit is set also
         // feed the echo input -- ONLY those (real hardware; previously
         // every voice went into the echo unconditionally).
         let eon = self.regs[0x4D];
+        let non = self.regs[0x3D];
+        let pmon = self.regs[0x2D];
+        let noise = self.noise;
         let mut mix_left: i32 = 0;
         let mut mix_right: i32 = 0;
         let mut echo_in_left: i32 = 0;
         let mut echo_in_right: i32 = 0;
+        // Previous voice's post-envelope output, which pitch modulation
+        // (PMON, $2D) feeds forward into the next voice's pitch. Voice 0
+        // has no predecessor, so PMON bit 0 is unused on hardware.
+        let mut prev_enveloped: i32 = 0;
 
         for i in 0..self.voices.len() {
             let base = i * 0x10;
             let vol_l = self.regs[base] as i8;
             let vol_r = self.regs[base + 1] as i8;
-            let pitch = ((self.regs[base + 2] as u16) | ((self.regs[base + 3] as u16) << 8)) & 0x3FFF;
+            let mut pitch =
+                ((self.regs[base + 2] as u16) | ((self.regs[base + 3] as u16) << 8)) & 0x3FFF;
+            // PMON: modulate this voice's pitch by the previous voice's
+            // output (bsnes `voice_V3b`). Clamped into the 14-bit pitch
+            // range so a large negative modulation can't run the read
+            // position backwards through our unsigned accumulator.
+            if i > 0 && pmon & (1 << i) != 0 {
+                let modulated =
+                    pitch as i32 + (((prev_enveloped >> 5) * pitch as i32) >> 10);
+                pitch = modulated.clamp(0, 0x3FFF) as u16;
+            }
             let srcn = self.regs[base + 4];
             let adsr1 = self.regs[base + 5];
             let adsr2 = self.regs[base + 6];
             let gain = self.regs[base + 7];
-            let (left, right) = self.voices[i].sample(
-                ram, vol_l, vol_r, pitch, srcn, adsr1, adsr2, gain, dir, counter,
+            let use_noise = non & (1 << i) != 0;
+            let (left, right, enveloped) = self.voices[i].sample(
+                ram, vol_l, vol_r, pitch, srcn, adsr1, adsr2, gain, dir, counter, use_noise,
+                noise,
             );
-            mix_left += left;
-            mix_right += right;
+            prev_enveloped = enveloped;
+            // Hardware exposes the running envelope level and the voice's
+            // post-envelope output in ENVX ($x8) and OUTX ($x9). Sound
+            // drivers poll these for fades and voice stealing; leaving them
+            // at their power-on value made those drivers misbehave.
+            self.regs[base + 8] = (self.voices[i].adsr.get_output() >> 4) as u8;
+            self.regs[base + 9] = ((enveloped >> 8) as i8) as u8;
+            // Hardware saturates the accumulator after EACH voice is added,
+            // not once at the end of the mix, so an overdriven mix
+            // compresses rather than wrapping or clipping late.
+            mix_left = clamp16(mix_left + left);
+            mix_right = clamp16(mix_right + right);
             if eon & (1 << i) != 0 {
-                echo_in_left += left;
-                echo_in_right += right;
+                echo_in_left = clamp16(echo_in_left + left);
+                echo_in_right = clamp16(echo_in_right + right);
             }
             // Aggregate this voice's live ENDX latch (see the `endx`
             // field's doc comment on `Voice`) into the visible $7C
@@ -2267,11 +2419,7 @@ impl Dsp {
         // EFB feedback into the buffer. Buffer writes are gated on the FLG
         // ($6C) echo-disable bit like real hardware.
         let edl = (self.regs[0x7D] & 0x0F) as usize;
-        let delay = if edl == 0 { 1 } else { edl * 512 };
-        if self.echo_ring.len() != delay {
-            self.echo_ring = vec![(0, 0); delay];
-            self.echo_pos = 0;
-        }
+        let want_delay = if edl == 0 { 1 } else { edl * 512 };
 
         let (delayed_l, delayed_r) = self.echo_ring[self.echo_pos];
         self.fir_pos = (self.fir_pos + 1) % 8;
@@ -2295,23 +2443,45 @@ impl Dsp {
         // 16-bit range the real echo RAM holds -- unbounded values would
         // compound through the feedback multiply and overflow i32).
         let echo_feedback = (self.regs[0x0D] as i8) as i32;
-        let echo_write_disabled = self.regs[0x6C] & 0x20 != 0;
+        let echo_write_disabled = flg & 0x20 != 0;
         if !echo_write_disabled {
-            let wl = (echo_in_left + ((fir_l * echo_feedback) >> 7)).clamp(-32768, 32767);
-            let wr = (echo_in_right + ((fir_r * echo_feedback) >> 7)).clamp(-32768, 32767);
+            let wl = clamp16(echo_in_left + ((fir_l * echo_feedback) >> 7));
+            let wr = clamp16(echo_in_right + ((fir_r * echo_feedback) >> 7));
             self.echo_ring[self.echo_pos] = (wl, wr);
         }
-        self.echo_pos = (self.echo_pos + 1) % self.echo_ring.len();
+        // Advance the delay line, and latch an EDL ($7D) change only when
+        // the buffer offset wraps -- what hardware does, since EDL is only
+        // consulted to decide where the wrap happens. This used to
+        // reallocate-and-zero the whole ring the instant EDL changed, so a
+        // game switching echo length between songs got an abrupt echo
+        // cutout and a click; `resize` here preserves the overlapping
+        // history instead.
+        self.echo_pos += 1;
+        if self.echo_pos >= self.echo_ring.len() {
+            self.echo_pos = 0;
+            if self.echo_ring.len() != want_delay {
+                self.echo_ring.resize(want_delay, (0, 0));
+            }
+        }
 
         // Add echo to output
         let echo_volume_left = (self.regs[0x2C] as i8) as i32;
         let echo_volume_right = (self.regs[0x3C] as i8) as i32;
-        mix_left += (fir_l * echo_volume_left) >> 7;
-        mix_right += (fir_r * echo_volume_right) >> 7;
+        mix_left = clamp16(mix_left + ((fir_l * echo_volume_left) >> 7));
+        mix_right = clamp16(mix_right + ((fir_r * echo_volume_right) >> 7));
 
-        // Clamp and output
-        let out_left = mix_left.clamp(-32768, 32767) as i16;
-        let out_right = mix_right.clamp(-32768, 32767) as i16;
+        // FLG bit 6 mutes all DSP output. Ignoring it meant a game that
+        // muted the DSP (common while uploading a new sound bank) kept
+        // playing whatever the voices still held.
+        if flg & 0x40 != 0 {
+            mix_left = 0;
+            mix_right = 0;
+        }
+
+        let out_left = mix_left as i16;
+        let out_right = mix_right as i16;
+        self.output_left = out_left;
+        self.output_right = out_right;
 
         (out_left, out_right)
     }
@@ -2398,7 +2568,25 @@ pub struct Apu {
     /// ready" handshake loops spun long enough for a second NMI to fire
     /// inside the previous handler and corrupt the stack.
     spc_cycle_debt: u32,
+
+    /// Unspent SPC700 cycle budget. An instruction can't be split across
+    /// `tick()` calls, so whichever instruction runs past the end of a
+    /// tick's budget leaves this negative, and the next tick pays it off
+    /// before running anything. See `tick`.
+    spc_cycle_credit: i64,
+
+    /// The machine's master clock in Hz, used to convert the master/8 pacing
+    /// units `tick` receives into real SPC700 cycles. NTSC by default; PAL
+    /// machines run a different crystal, so `SystemBus::set_video_mode`
+    /// updates this alongside the PPU's mode.
+    master_clock_hz: u32,
 }
+
+/// NTSC master clock (Hz). 21,477,272 / (341 dots x 4 x 262 lines) = the
+/// canonical 60.0988 fps.
+pub const NTSC_MASTER_CLOCK_HZ: u32 = 21_477_272;
+/// PAL master clock (Hz). 21,281,370 / (341 dots x 4 x 312 lines) = 50.007 fps.
+pub const PAL_MASTER_CLOCK_HZ: u32 = 21_281_370;
 
 impl Apu {
     /// Create a new APU with initialized RAM.
@@ -2434,6 +2622,8 @@ impl Apu {
             sample_divider: 32,
             sample_counter: 0,
             spc_cycle_debt: 0,
+            spc_cycle_credit: 0,
+            master_clock_hz: NTSC_MASTER_CLOCK_HZ,
         };
 
         apu.init_boot_rom();
@@ -2457,6 +2647,16 @@ impl Apu {
 
         self.frame_counter = 0;
         self.frame_cycles = 0;
+    }
+
+    /// Sets the machine's master clock, which `tick` uses to convert the
+    /// master/8 pacing units it receives into real SPC700 cycles. Use
+    /// `NTSC_MASTER_CLOCK_HZ` / `PAL_MASTER_CLOCK_HZ`; `SystemBus::set_video_mode`
+    /// keeps this in step with the PPU's video standard.
+    pub fn set_master_clock_hz(&mut self, hz: u32) {
+        if hz > 0 {
+            self.master_clock_hz = hz;
+        }
     }
 
     /// Read from APU port ($2140-$2143), the main CPU's read side. Backed
@@ -2564,11 +2764,39 @@ impl Apu {
         // remainder across calls. The intermediate product is computed in
         // u64 because a large DMA can tick tens of thousands of unit
         // cycles at once.
-        let debt = self.spc_cycle_debt as u64 + cycles as u64 * 1_024_000;
-        let spc_cycles = (debt / 2_684_659) as u32;
-        self.spc_cycle_debt = (debt % 2_684_659) as u32;
-        for _ in 0..spc_cycles {
-            self.spc700.step();
+        // Expressed against the machine's master clock rather than a
+        // hardcoded NTSC-derived unit rate: `cycles` counts master/8 units,
+        // so one unit is `8 / master_clock_hz` seconds and the SPC700 advances
+        // `cycles * 8 * 1_024_000 / master_clock_hz` of its own cycles. With
+        // the NTSC master clock this is exactly the old 2,684,659-unit
+        // divisor; with PAL's 21,281,370 Hz clock the unit is 0.9% shorter,
+        // which the old constant would have turned into a 0.9% slow SPC700 --
+        // and therefore a 31,708 Hz sample stream feeding a 32,000 Hz player,
+        // a drift too large for the frontend's +/-0.5% rate control to absorb.
+        let debt = self.spc_cycle_debt as u64 + cycles as u64 * 8 * 1_024_000;
+        let master = self.master_clock_hz as u64;
+        let spc_cycles = (debt / master) as u32;
+        self.spc_cycle_debt = (debt % master) as u32;
+
+        // Spend that cycle budget on instructions, charging each one its
+        // real cost. This used to run one *instruction* per SPC700 cycle and
+        // throw the returned cycle count away, so the SPC700 executed at
+        // roughly 3.5x its real throughput (the average instruction is ~3.5
+        // cycles). Tempo and sample rate still came out right -- the timers
+        // and the DSP divider were both calibrated in those instruction
+        // units -- but any driver whose timing depends on how much work fits
+        // between two timer ticks (streaming engines, tight IPC handshakes)
+        // saw a machine 3.5x faster than hardware.
+        //
+        // An instruction can't be split across calls, so the overshoot is
+        // carried as a negative credit and paid off by the next tick.
+        self.spc_cycle_credit += spc_cycles as i64;
+        while self.spc_cycle_credit > 0 {
+            let used = self.spc700.step().max(1);
+            for _ in 0..used {
+                self.spc700.tick_timers();
+            }
+            self.spc_cycle_credit -= used as i64;
         }
 
         // The DSP is clocked by the SPC700: one stereo sample per 32
@@ -2653,6 +2881,9 @@ impl Apu {
         put_u32(out, self.frame_cycles);
         put_u32(out, self.sample_counter);
         put_u32(out, self.spc_cycle_debt);
+        // Never positive (see the field), so it round-trips as a magnitude.
+        put_u32(out, (-self.spc_cycle_credit).clamp(0, u32::MAX as i64) as u32);
+        put_u32(out, self.master_clock_hz);
     }
 
     /// Restores state produced by `save_state`.
@@ -2690,6 +2921,12 @@ impl Apu {
         self.frame_cycles = r.u32()?;
         self.sample_counter = r.u32()?;
         self.spc_cycle_debt = r.u32()?;
+        self.spc_cycle_credit = -(r.u32()? as i64);
+        // A zero here would divide by zero in `tick`.
+        self.master_clock_hz = match r.u32()? {
+            0 => NTSC_MASTER_CLOCK_HZ,
+            hz => hz,
+        };
         self.sample_buffer.clear();
         Ok(())
     }
@@ -2812,6 +3049,69 @@ mod tests {
             (31_999..=32_001).contains(&generated),
             "expected exactly ~32,000 samples for one emulated second, got {}",
             generated
+        );
+    }
+
+    #[test]
+    fn pal_machines_also_generate_exactly_32khz_audio() {
+        // The DSP is clocked by the SPC700's own crystal, so its output rate
+        // is 32kHz regardless of the video standard. `tick` receives master/8
+        // units, and a PAL master/8 unit is 0.9% shorter than an NTSC one --
+        // converting with a hardcoded NTSC unit rate (which is what the old
+        // code did) would produce a ~31,708 Hz stream against the frontend's
+        // 32,000 Hz playback, a drift the +/-0.5% rate control can't absorb.
+        let mut apu = Apu::new();
+        apu.set_master_clock_hz(PAL_MASTER_CLOCK_HZ);
+
+        // One emulated PAL second: 21,281,370 master cycles / 8.
+        const ONE_SECOND_OF_UNIT_CYCLES: u32 = PAL_MASTER_CLOCK_HZ / 8;
+        const CHUNK: u32 = 977;
+        let mut remaining = ONE_SECOND_OF_UNIT_CYCLES;
+        while remaining > 0 {
+            let step = remaining.min(CHUNK);
+            apu.tick(step);
+            remaining -= step;
+        }
+
+        let generated = apu.buffer_size();
+        assert!(
+            (31_998..=32_002).contains(&generated),
+            "a PAL machine must still generate ~32,000 samples per emulated \
+             second, got {}",
+            generated
+        );
+    }
+
+    #[test]
+    fn spc700_charges_each_instruction_its_real_cycle_cost() {
+        // Regression guard: `Apu::tick` used to run one *instruction* per
+        // SPC700 cycle and discard `step()`'s returned cycle count, so the
+        // SPC700 executed at roughly 3.5x its real throughput. Tempo still
+        // came out right (timers and the DSP divider were calibrated in
+        // those instruction units), which is why it went unnoticed -- but
+        // drivers whose timing depends on how much work fits between two
+        // timer ticks saw a machine far faster than hardware.
+        //
+        // A straight run of `INC A` ($BC, 2 cycles) advances the program
+        // counter exactly one byte per instruction and never branches, so
+        // the PC delta counts instructions directly.
+        let mut apu = Apu::new();
+        for addr in 0x0200u16..0x1200 {
+            apu.write_ram(addr, 0xBC);
+        }
+        apu.spc700.pc = 0x0200;
+
+        // 5244 pacing-unit cycles = 2000 SPC700 cycles (unit rate is
+        // 2,684,659 Hz against the SPC700's 1,024,000 Hz).
+        apu.tick(5244);
+
+        let instructions = apu.spc700.pc - 0x0200;
+        assert!(
+            (990..=1010).contains(&instructions),
+            "2000 SPC700 cycles of a 2-cycle instruction must execute ~1000 \
+             instructions; the old one-instruction-per-cycle model ran ~2000. \
+             Got {}",
+            instructions
         );
     }
 
@@ -3196,9 +3496,17 @@ mod tests {
     }
 
     /// Builds APU RAM with a sample directory at page 2 (dir=$02) whose
-    /// source 0 points at a BRR sample at $0300: a self-looping run of
-    /// blocks whose decoded samples ramp upward (shift 0, filter 0, raw
-    /// nibbles 0..7 -> decoded values 0..7 repeating). Returns the RAM.
+    /// source 0 points at a BRR sample at $0300: a self-looping block whose
+    /// 16 nibbles are 0,1,2,...,15 in hardware play order (high nibble of
+    /// each byte first), decoding to a full-scale sawtooth.
+    ///
+    /// The shift is 11 rather than 0 so the decoded samples span most of
+    /// the i16 range. With shift 0 the whole waveform fits in -8..+6, and
+    /// the DSP's real output path (gaussian taps scaled `>> 11`, then the
+    /// hardware's low-bit clear) quantizes a signal that small down to a
+    /// handful of distinct values -- which makes amplitude-sensitive
+    /// assertions like `resampling_interpolates_between_source_samples...`
+    /// measure quantization instead of the thing they mean to measure.
     fn ram_with_ramp_sample() -> Box<[u8; 65536]> {
         let mut ram: Box<[u8; 65536]> = vec![0u8; 65536].try_into().unwrap();
         // Directory entry 0 at $0200: start=$0300, loop=$0300.
@@ -3206,9 +3514,9 @@ mod tests {
         ram[0x0201] = 0x03;
         ram[0x0202] = 0x00;
         ram[0x0203] = 0x03;
-        // One BRR block at $0300: header shift=0/filter=0, loop+end set so
+        // One BRR block at $0300: header shift=11/filter=0, loop+end set so
         // it loops onto itself forever. Nibbles 0,1,2,...,15 -> a ramp.
-        ram[0x0300] = 0x03; // end(bit0) + loop(bit1)
+        ram[0x0300] = 0xB3; // shift=11 (bits 4-7) + end(bit0) + loop(bit1)
         for i in 0..8usize {
             let hi = (i * 2) as u8;
             let lo = (i * 2 + 1) as u8;
@@ -3264,6 +3572,240 @@ mod tests {
             "at half pitch, adjacent output samples must mostly be interpolated (distinct), \
              not duplicated stair-steps; got {:.0}% equal pairs",
             ratio * 100.0
+        );
+    }
+
+    #[test]
+    fn non_flagged_voice_plays_the_noise_lfsr_instead_of_its_brr_sample() {
+        // Regression guard for a completely absent noise generator: the DSP
+        // never read NON ($3D) or FLG's noise-rate bits and had no LFSR at
+        // all, so voices flagged for noise played their (usually
+        // meaningless) BRR data instead. Percussion -- hi-hats, snares,
+        // cymbals -- and noise SFX (wind, rain, explosions) were wrong or
+        // missing across a large part of the library.
+        let ram = ram_with_ramp_sample();
+
+        let mut noisy = Dsp::new();
+        configure_ramp_voice(&mut noisy, 0x1000);
+        noisy.write_reg(0x3D, 0x01); // NON: voice 0 uses noise
+        noisy.write_reg(0x6C, 0x1F); // FLG: fastest noise clock, echo on
+
+        let mut tonal = Dsp::new();
+        configure_ramp_voice(&mut tonal, 0x1000);
+        tonal.write_reg(0x6C, 0x1F);
+
+        let mut noisy_out = Vec::new();
+        let mut tonal_out = Vec::new();
+        for _ in 0..400 {
+            noisy_out.push(noisy.sample(&ram).0 as i32);
+            tonal_out.push(tonal.sample(&ram).0 as i32);
+        }
+
+        assert_ne!(
+            noisy_out, tonal_out,
+            "a NON-flagged voice must not produce the same output as the BRR sample"
+        );
+        // The LFSR must actually be running: a stuck generator would emit a
+        // constant (or DC-ish) value rather than a broadband signal.
+        let distinct: std::collections::HashSet<i32> =
+            noisy_out[100..].iter().copied().collect();
+        assert!(
+            distinct.len() > 20,
+            "the noise LFSR must advance, giving many distinct values; got {}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn noise_clock_rate_zero_freezes_the_lfsr() {
+        // FLG bits 0-4 = 0 selects the rate that never fires (see
+        // `COUNTER_RATES[0]`), so the noise value must hold steady -- games
+        // rely on this to hold a fixed "noise" DC level.
+        let ram = ram_with_ramp_sample();
+        let mut dsp = Dsp::new();
+        configure_ramp_voice(&mut dsp, 0x1000);
+        dsp.write_reg(0x3D, 0x01); // NON voice 0
+        dsp.write_reg(0x6C, 0x00); // noise rate 0 -> never clocks
+
+        let mut out = Vec::new();
+        for _ in 0..200 {
+            out.push(dsp.sample(&ram).0 as i32);
+        }
+        // Past the attack ramp the envelope is flat, so a frozen LFSR gives
+        // a constant output.
+        let tail = &out[100..];
+        assert!(
+            tail.iter().all(|&v| v == tail[0]),
+            "with noise rate 0 the LFSR must not advance; got varying output"
+        );
+    }
+
+    #[test]
+    fn pitch_modulation_alters_the_modulated_voices_output() {
+        // Regression guard for absent PMON ($2D): voice N's pitch must be
+        // modulated by voice N-1's post-envelope output. Games use this for
+        // vibrato/growl effects, which played as static pitch before.
+        let ram = ram_with_ramp_sample();
+
+        let configure_pair = |dsp: &mut Dsp, pmon: u8| {
+            dsp.write_reg(0x5D, 0x02); // DIR page 2
+            for base in [0x00u8, 0x10u8] {
+                dsp.write_reg(base, 0x7F); // VOL(L)
+                dsp.write_reg(base + 1, 0x7F); // VOL(R)
+                dsp.write_reg(base + 2, 0x00); // pitch lo
+                dsp.write_reg(base + 3, 0x10); // pitch hi -> 0x1000
+                dsp.write_reg(base + 4, 0x00); // SRCN 0
+                dsp.write_reg(base + 5, 0x8F); // ADSR1 enabled, fast attack
+                dsp.write_reg(base + 6, 0xE0); // ADSR2 max sustain
+            }
+            dsp.write_reg(0x0C, 0x7F); // MVOLL
+            dsp.write_reg(0x1C, 0x7F); // MVOLR
+            dsp.write_reg(0x2D, pmon);
+            dsp.write_reg(0x4C, 0x03); // KON voices 0 and 1
+        };
+
+        let mut modulated = Dsp::new();
+        configure_pair(&mut modulated, 0x02); // PMON on voice 1
+        let mut plain = Dsp::new();
+        configure_pair(&mut plain, 0x00);
+
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for _ in 0..600 {
+            a.push(modulated.sample(&ram).0 as i32);
+            b.push(plain.sample(&ram).0 as i32);
+        }
+
+        assert_ne!(
+            a, b,
+            "setting a voice's PMON bit must change its pitch, and so its output"
+        );
+    }
+
+    #[test]
+    fn pmon_bit_for_voice_zero_is_ignored() {
+        // Voice 0 has no predecessor, so hardware leaves PMON bit 0 unused.
+        let ram = ram_with_ramp_sample();
+        let mut with_bit = Dsp::new();
+        configure_ramp_voice(&mut with_bit, 0x1000);
+        with_bit.write_reg(0x2D, 0x01);
+        let mut without = Dsp::new();
+        configure_ramp_voice(&mut without, 0x1000);
+
+        for _ in 0..200 {
+            assert_eq!(with_bit.sample(&ram), without.sample(&ram));
+        }
+    }
+
+    #[test]
+    fn flg_mute_bit_silences_the_output() {
+        // FLG bit 6 mutes all DSP output. Drivers set it while swapping
+        // sample banks; ignoring it let the old voices keep sounding.
+        let ram = ram_with_ramp_sample();
+        let mut dsp = Dsp::new();
+        configure_ramp_voice(&mut dsp, 0x1000);
+
+        // Establish that the voice is audible first, so the assertion below
+        // can't pass just because nothing was playing.
+        let mut audible = false;
+        for _ in 0..200 {
+            if dsp.sample(&ram).0 != 0 {
+                audible = true;
+            }
+        }
+        assert!(audible, "the voice must be producing sound before muting");
+
+        dsp.write_reg(0x6C, 0x40); // FLG: mute
+        for _ in 0..200 {
+            assert_eq!(dsp.sample(&ram), (0, 0), "FLG bit 6 must mute the DSP");
+        }
+    }
+
+    #[test]
+    fn flg_soft_reset_bit_key_offs_every_voice() {
+        // FLG bit 7 is a DSP soft reset: hardware key-offs all voices.
+        let ram = ram_with_ramp_sample();
+        let mut dsp = Dsp::new();
+        configure_ramp_voice(&mut dsp, 0x1000);
+        for _ in 0..50 {
+            dsp.sample(&ram);
+        }
+        assert!(dsp.voices[0].active, "voice must be running before the reset");
+
+        dsp.write_reg(0x6C, 0x80);
+        // The envelope is zeroed and put in release, so the next sample
+        // retires the voice.
+        dsp.sample(&ram);
+        assert!(
+            !dsp.voices[0].active,
+            "FLG bit 7 must key-off every voice"
+        );
+    }
+
+    #[test]
+    fn envx_and_outx_registers_track_the_running_voice() {
+        // Regression guard: ENVX ($x8) and OUTX ($x9) were never written
+        // back, so sound drivers that poll them (fade-outs, voice stealing)
+        // read the power-on value forever.
+        let ram = ram_with_ramp_sample();
+        let mut dsp = Dsp::new();
+        configure_ramp_voice(&mut dsp, 0x1000);
+
+        for _ in 0..300 {
+            dsp.sample(&ram);
+        }
+
+        assert_ne!(
+            dsp.read_reg(0x08), 0,
+            "ENVX must expose the running envelope level"
+        );
+        let mut outx_values = std::collections::HashSet::new();
+        for _ in 0..200 {
+            dsp.sample(&ram);
+            outx_values.insert(dsp.read_reg(0x09));
+        }
+        assert!(
+            outx_values.len() > 1,
+            "OUTX must follow the voice's output, not hold one value"
+        );
+    }
+
+    #[test]
+    fn changing_edl_preserves_echo_history_until_the_buffer_wraps() {
+        // Regression guard: any $7D write that changed EDL used to
+        // reallocate-and-zero the delay line immediately, so a game
+        // switching echo length between songs got an abrupt echo cutout and
+        // a click. Hardware only consults EDL to decide where the buffer
+        // offset wraps, so a mid-buffer change must leave the existing
+        // reflection audible until then.
+        let ram = ram_with_ramp_sample();
+        let mut dsp = Dsp::new();
+        configure_ramp_voice(&mut dsp, 0x1000);
+        dsp.write_reg(0x7D, 0x01); // EDL = 1 -> 512-sample ring
+        dsp.write_reg(0x4D, 0x01); // EON voice 0
+        dsp.write_reg(0x2C, 0x7F); // EVOL(L)
+        dsp.write_reg(0x3C, 0x7F); // EVOL(R)
+        dsp.write_reg(0x7F, 0x7F); // FIR coefficient 7 = newest tap
+
+        // Fill the delay line and get past the first wrap so echo energy is
+        // actually flowing.
+        for _ in 0..700 {
+            dsp.sample(&ram);
+        }
+        let before: Vec<i32> = (0..20).map(|_| dsp.sample(&ram).0 as i32).collect();
+
+        // Grow the echo length mid-buffer; the next handful of samples must
+        // still read the history already in the ring.
+        dsp.write_reg(0x7D, 0x04); // EDL = 4 -> 2048-sample ring, at next wrap
+        let after: Vec<i32> = (0..20).map(|_| dsp.sample(&ram).0 as i32).collect();
+
+        assert!(
+            after.iter().any(|&v| v != 0),
+            "the echo must keep sounding across an EDL change, not cut out"
+        );
+        assert!(
+            before.iter().any(|&v| v != 0),
+            "sanity: echo must be audible before the EDL change"
         );
     }
 
@@ -3426,12 +3968,86 @@ mod tests {
         let mut decoder = BrrDecoder::new();
         let header = 0xC0; // shift=12 (0xC), filter=0
         let mut data = [0u8; 8];
-        data[0] = 0x01; // first nibble (low nibble of byte 0) = 1
+        data[0] = 0x10; // first nibble = HIGH nibble of byte 0 (see `decode`)
         let mut output = [0i16; 16];
 
         decoder.decode(header, &data, &mut output);
 
         assert_eq!(output[0], 4096, "shift=12 on nibble value 1 with no filter must give ((1<<12)>>1)*2 = 4096");
+    }
+
+    #[test]
+    fn brr_decode_plays_the_high_nibble_of_each_byte_before_its_low_nibble() {
+        // Regression guard for a scrambled BRR nibble order: hardware plays
+        // H0,L0,H1,L1,...,H7,L7 (fullsnes; bsnes `decode_brr`), but this
+        // used to emit all eight LOW nibbles first and then all eight HIGH
+        // nibbles. That time-scrambled every 16-sample block of every
+        // sample in every game AND ran the prediction filters' history in
+        // the wrong order, so decoded amplitudes were wrong too -- heard as
+        // constant graininess on all sampled instruments.
+        //
+        // Nibbles 0..15 laid out in hardware order must decode to a
+        // strictly increasing ramp; the old order produced
+        // 1,3,5,...,15,0,2,...,14, which is NOT monotonic.
+        let mut decoder = BrrDecoder::new();
+        let header = 0xB0; // shift=11, filter=0 (no history feedback)
+        let mut data = [0u8; 8];
+        for i in 0..8usize {
+            data[i] = ((i as u8 * 2) << 4) | (i as u8 * 2 + 1);
+        }
+        let mut output = [0i16; 16];
+
+        decoder.decode(header, &data, &mut output);
+
+        // Nibbles 0..7 are positive and 8..15 are negative (4-bit signed),
+        // so the ramp rises across the first half and, after wrapping to
+        // the most negative value, rises again across the second half.
+        for half in [&output[0..8], &output[8..16]] {
+            for w in half.windows(2) {
+                assert!(
+                    w[1] > w[0],
+                    "nibbles must decode in hardware order (high nibble first), \
+                     giving a monotonic ramp; got {:?}",
+                    output
+                );
+            }
+        }
+        assert!(
+            output[8] < output[7],
+            "nibble 8 is the most negative 4-bit value, so it must drop below nibble 7"
+        );
+    }
+
+    #[test]
+    fn gauss_table_matches_hardware_shape() {
+        // Pins the transcription of the hardware gaussian kernel (see
+        // `GAUSS`): a typo'd digit would silently detune/alias every voice.
+        assert_eq!(GAUSS.len(), 512);
+        assert_eq!(GAUSS[0], 0);
+        assert_eq!(GAUSS[511], 1305, "the table's documented peak value");
+        assert!(
+            GAUSS.windows(2).all(|w| w[1] >= w[0]),
+            "the kernel is monotonically non-decreasing"
+        );
+        // The four taps a given offset selects sum to 2048 +/- 1 (hardware
+        // rounding), so interpolation has unity gain after the `>> 11`.
+        for offset in 0..256usize {
+            let sum = GAUSS[255 - offset] as i32
+                + GAUSS[511 - offset] as i32
+                + GAUSS[256 + offset] as i32
+                + GAUSS[offset] as i32;
+            assert!(
+                (2047..=2049).contains(&sum),
+                "taps for offset {} sum to {}, outside hardware's 2048 +/- 1",
+                offset,
+                sum
+            );
+        }
+        // The classic offset-0 quadruple, quoted in the DSP documentation.
+        assert_eq!(
+            (GAUSS[255], GAUSS[511], GAUSS[256], GAUSS[0]),
+            (370, 1305, 374, 0)
+        );
     }
 
     // ========================================================================
