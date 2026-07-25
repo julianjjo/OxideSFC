@@ -8,7 +8,6 @@ mod vram;
 mod cgram;
 mod oam;
 mod ppu;
-mod io;
 mod apu;
 mod dma;
 mod renderer;
@@ -23,7 +22,6 @@ pub use vram::Vram;
 pub use cgram::Cgram;
 pub use oam::Oam;
 pub use ppu::{Ppu, PpuMode, PpuRegisters};
-pub use io::IoRegisters;
 pub use apu::Apu;
 pub use dma::Dma;
 pub use renderer::{
