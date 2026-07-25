@@ -214,18 +214,18 @@ fn oam_multiple_sprites() {
     
     // Write multiple sprites (use smaller values to avoid overflow)
     for i in 0..128 {
-        oam.set_y(i, i as u8);
-        oam.set_x(i, (i * 2) as u8);
-        oam.set_tile(i, i as u8);  // Use i instead of i*3 to avoid overflow
-        oam.set_attributes(i, (i & 0x3F) as u8);  // Mask to avoid invalid attribute bits
+        oam.set_y(i, i);
+        oam.set_x(i, i * 2 );
+        oam.set_tile(i, i);  // Use i instead of i*3 to avoid overflow
+        oam.set_attributes(i, i & 0x3F );  // Mask to avoid invalid attribute bits
     }
     
     // Verify all sprites
     for i in 0..128 {
-        assert_eq!(oam.get_y(i), i as u8);
-        assert_eq!(oam.get_x(i), (i * 2) as u8);
-        assert_eq!(oam.get_tile(i), i as u8);
-        assert_eq!(oam.get_attributes(i), (i & 0x3F) as u8);
+        assert_eq!(oam.get_y(i), i);
+        assert_eq!(oam.get_x(i), (i * 2));
+        assert_eq!(oam.get_tile(i), i);
+        assert_eq!(oam.get_attributes(i), (i & 0x3F));
     }
 }
 

@@ -40,14 +40,45 @@ mod window;
 #[cfg(test)]
 mod tests;
 
+use crate::cgram::Cgram;
+use crate::oam::Oam;
+use crate::ppu::PpuRegisters;
+use crate::vram::Vram;
+
 // `render_frame_per_scanline_with_status` is deliberately not re-exported:
 // only this module's own tests use it, and they reach it through `compose`.
-pub use compose::{
-    render_frame, render_frame_per_scanline, render_frame_per_scanline_with_cgram,
-};
+pub use compose::{render_frame, render_frame_per_scanline, render_frame_per_scanline_with_cgram};
 
 pub const SCREEN_WIDTH: usize = 256;
 pub const SCREEN_HEIGHT: usize = 224;
+
+/// The read-only PPU state a layer needs in order to draw itself.
+///
+/// Bundled rather than passed as four separate references so that adding a
+/// layer kind doesn't mean threading another parameter through every draw
+/// signature. `regs` is one scanline band's snapshot, not the live registers
+/// -- see `registers::PpuRegisters`.
+pub(super) struct Frame<'a> {
+    pub vram: &'a Vram,
+    pub cgram: &'a Cgram,
+    pub oam: &'a Oam,
+    pub regs: &'a PpuRegisters,
+}
+
+/// A half-open range of output scanlines, `y0..y1`.
+#[derive(Clone, Copy)]
+pub(super) struct Band {
+    pub y0: usize,
+    pub y1: usize,
+}
+
+/// Where a layer draws: the BGR555 color buffer and the parallel per-pixel
+/// source-layer ids that color math later keys off. The two must stay in
+/// lockstep, which is why they travel together.
+pub(super) struct Target<'a> {
+    pub color: &'a mut [u16],
+    pub layer: &'a mut [u8],
+}
 
 /// Per-pixel source-layer id, used to decide (via CGADSUB) whether color
 /// math applies to a given main-screen pixel. Values line up with

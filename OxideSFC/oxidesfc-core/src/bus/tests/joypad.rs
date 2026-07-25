@@ -56,7 +56,7 @@ fn auto_joypad_read_maps_every_button_to_its_documented_bit() {
         bus.set_joypad1_state(snes_bits);
         tick_past_one_vblank_entry(&mut bus);
         assert_eq!(
-            bus.read_u8(0x000000 | reg_addr as u32).unwrap(),
+            bus.read_u8(reg_addr as u32).unwrap(),
             expected,
             "button bits {:#06X} must set exactly {:#04X} at ${:04X}",
             snes_bits, expected, reg_addr

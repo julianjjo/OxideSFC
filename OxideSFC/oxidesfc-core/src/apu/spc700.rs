@@ -133,7 +133,7 @@ impl Psw {
     /// real, software-visible, independently-settable flag (SETP/CLRP),
     /// not a fixed 1. Forcing it meant `to_byte` could never actually
     /// report `p == false` no matter what SETP/CLRP had done.
-    pub(super) fn to_byte(&self) -> u8 {
+    pub(super) fn to_byte(self) -> u8 {
         (if self.n { 0x80 } else { 0 })
             | (if self.v { 0x40 } else { 0 })
             | (if self.p { 0x20 } else { 0 })
@@ -185,12 +185,12 @@ impl Spc700 {
     /// rates because the caller also (incorrectly) ran exactly one
     /// instruction per SPC700 cycle.
     pub(super) fn tick_timers(&mut self) {
-        for i in 0..3 {
+        for (i, &divisor) in TIMER_PRESCALER_DIVISOR.iter().enumerate() {
             if !self.timer_enable[i] {
                 continue;
             }
             self.timer_prescaler[i] += 1;
-            if self.timer_prescaler[i] >= TIMER_PRESCALER_DIVISOR[i] {
+            if self.timer_prescaler[i] >= divisor {
                 self.timer_prescaler[i] = 0;
                 self.timer_divider[i] = self.timer_divider[i].wrapping_add(1);
                 if self.timer_divider[i] == self.timer_target[i] {

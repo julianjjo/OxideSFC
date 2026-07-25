@@ -140,7 +140,7 @@ impl Cartridge {
 
     fn parse_title(bytes: &[u8]) -> String {
         String::from_utf8_lossy(bytes)
-            .trim_end_matches(|c: char| c == '\0' || c == ' ')
+            .trim_end_matches(['\0', ' '])
             .to_string()
     }
 

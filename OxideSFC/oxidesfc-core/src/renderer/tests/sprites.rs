@@ -60,10 +60,12 @@ fn sprite_renders_at_its_oam_position_with_object_palette() {
     cgram.write(129 * 2, 0xE0); // arbitrary nonzero BGR555 low byte
     cgram.write(129 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0x00; // size pair 0 (8x8/16x16), tile base word 0
-    regs.tm = 0x10; // enable sprites only
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0x00, // size pair 0 (8x8/16x16), tile base word 0
+        tm: 0x10, // enable sprites only
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     let expected = bgr555_to_rgb8(cgram.read_color(129));
@@ -104,16 +106,18 @@ fn tall_sprite_near_the_bottom_wraps_its_rows_to_the_top_of_the_screen() {
     cgram.write(129 * 2, 0xE0);
     cgram.write(129 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0x20; // size pair 1 = 8x8 / 32x32
-    regs.tm = 0x10; // sprites only
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0x20, // size pair 1 = 8x8 / 32x32
+        tm: 0x10, // sprites only
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     let expected = bgr555_to_rgb8(cgram.read_color(129));
 
     // Row 6 of the sprite lands on screen line 0 ((250 + 6) & 0xFF).
-    let top = (0 * SCREEN_WIDTH + 8) * 4;
+    let top = 8 * 4; // row 0, x = 8
     assert_eq!(
         (fb[top], fb[top + 1], fb[top + 2]),
         expected,
@@ -187,10 +191,12 @@ fn obsel_and_oam_attributes_decode_per_real_hardware_bit_layout() {
     cgram.write(129 * 2, 0xE0);
     cgram.write(129 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0x01; // size pair 0 (8x8), name 0, BASE = word 0x2000
-    regs.tm = 0x10;
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0x01, // size pair 0 (8x8), name 0, BASE = word 0x2000
+        tm: 0x10,
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
 
@@ -224,7 +230,7 @@ fn large_sprite_tile_column_wraps_within_low_nibble() {
     tile1_row0[0] = 1;
     let tile1 = make_2bpp_tile([tile1_row0, [0; 8], [0; 8], [0; 8], [0; 8], [0; 8], [0; 8], [0; 8]]);
     for (i, &b) in tile1.iter().enumerate() {
-        vram.write(1 * 32 + i as u16, b); // 4bpp tile 1 starts at byte 32
+        vram.write(32 + i as u16, b); // 4bpp tile 1 starts at byte 32
     }
     // Tile index 0x11 = 17 (the WRONG unwrapped target) is left all
     // zero/transparent, so if the bug regresses the sprite pixel
@@ -244,10 +250,12 @@ fn large_sprite_tile_column_wraps_within_low_nibble() {
     cgram.write(129 * 2, 0x1F);
     cgram.write(129 * 2 + 1, 0x00);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0x20; // size-pair code 1 (8x8/32x32), tile base word 0
-    regs.tm = 0x10; // enable sprites only
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0x20, // size-pair code 1 (8x8/32x32), tile base word 0
+        tm: 0x10, // enable sprites only
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
 
@@ -286,10 +294,12 @@ fn oam_entry_byte_order_is_x_then_y_per_real_hardware() {
     oam.write(3, 0);
     oam.write(512, 0);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0;
-    regs.tm = 0x10;
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0,
+        tm: 0x10,
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     let at = |x: usize, y: usize| (fb[(y * SCREEN_WIDTH + x) * 4], fb[(y * SCREEN_WIDTH + x) * 4 + 1]) != (0, 0);

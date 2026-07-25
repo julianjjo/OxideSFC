@@ -537,7 +537,7 @@ impl Spc700 {
             0x7B => { let dp = self.fetch_u8().wrapping_add(self.x); let v = self.read_mem(self.dp_addr(dp)); let c_in = self.psw.c; let c_out = (v & 1) != 0; let r = (v >> 1) | ((c_in as u8) << 7); self.write_mem(self.dp_addr(dp), r); self.psw.c = c_out; self.set_zn(r); 5 } // ROR dp+X
             0x6C => { let addr = self.fetch_u16(); let v = self.read_mem(addr); let c_in = self.psw.c; let c_out = (v & 1) != 0; let r = (v >> 1) | ((c_in as u8) << 7); self.write_mem(addr, r); self.psw.c = c_out; self.set_zn(r); 5 } // ROR !abs
 
-            0x9F => { self.a = (self.a >> 4) | (self.a << 4); self.set_zn(self.a); 5 } // XCN A (exchange nibbles)
+            0x9F => { self.a = self.a.rotate_left(4); self.set_zn(self.a); 5 } // XCN A (exchange nibbles)
 
             0x3A => { // INCW dp
                 let dp = self.fetch_u8();

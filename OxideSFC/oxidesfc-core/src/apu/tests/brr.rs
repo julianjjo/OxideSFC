@@ -79,8 +79,8 @@ fn brr_decode_plays_the_high_nibble_of_each_byte_before_its_low_nibble() {
     let mut decoder = BrrDecoder::new();
     let header = 0xB0; // shift=11, filter=0 (no history feedback)
     let mut data = [0u8; 8];
-    for i in 0..8usize {
-        data[i] = ((i as u8 * 2) << 4) | (i as u8 * 2 + 1);
+    for (i, byte) in data.iter_mut().enumerate() {
+        *byte = ((i as u8 * 2) << 4) | (i as u8 * 2 + 1);
     }
     let mut output = [0i16; 16];
 

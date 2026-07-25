@@ -159,6 +159,7 @@ impl Default for GeneralSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct AppSettings {
     pub general: GeneralSettings,
     pub video: VideoSettings,
@@ -167,17 +168,6 @@ pub struct AppSettings {
     pub library: LibrarySettings,
 }
 
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            general: GeneralSettings::default(),
-            video: VideoSettings::default(),
-            audio: AudioSettings::default(),
-            controls: ControlSettings::default(),
-            library: LibrarySettings::default(),
-        }
-    }
-}
 
 fn get_settings_path_internal() -> Result<PathBuf, String> {
     let config_dir = dirs::config_dir()

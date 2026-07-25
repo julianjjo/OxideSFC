@@ -32,7 +32,7 @@ impl SystemBus {
             // $0000-$1FFF: WRAM mirror (Direct Page) -- see the matching
             // comment in `read_bus` for why `offset`, not `addr`, is correct.
             if offset < 0x2000 {
-                return self.wram.write_u8(offset as u32, value);
+                return self.wram.write_u8(offset, value);
             }
 
             // $2140-$217F: APU communication ports (mirrored every 4 bytes)
@@ -92,7 +92,7 @@ impl SystemBus {
                 let reg = offset - 0x210D;
                 let bg = (reg / 2) as usize;
                 let latch = self.ppu_regs.bg_scroll_latch;
-                if reg % 2 == 0 {
+                if reg.is_multiple_of(2) {
                     let old = self.ppu_regs.bg_hofs[bg];
                     self.ppu_regs.bg_hofs[bg] =
                         ((value as u16) << 8) | ((latch as u16) & 0xF8) | ((old >> 8) & 0x07);

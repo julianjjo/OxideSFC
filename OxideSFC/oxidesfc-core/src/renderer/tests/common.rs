@@ -52,11 +52,13 @@ pub(super) fn solid_bg1_setup() -> (Vram, Cgram, PpuRegisters) {
     cgram.write(2, 0x1F); // CGRAM 1 = red
     cgram.write(3, 0x00);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.bgmode = 1;
+    let mut regs = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 1,
+        tm: 0x01,
+        ..Default::default()
+    };
     regs.bg_sc[0] = 0x04;
-    regs.tm = 0x01;
     (vram, cgram, regs)
 }
 
@@ -105,9 +107,11 @@ pub(super) fn single_pixel_sprite_setup() -> (Vram, Cgram, PpuRegisters) {
     }
     cgram.write(129 * 2, 0xE0); // OBJ palette 0, pixel 1
     cgram.write(129 * 2 + 1, 0x03);
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0x00;
-    regs.tm = 0x10; // sprites only
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0x00,
+        tm: 0x10, // sprites only
+        ..Default::default()
+    };
     (vram, cgram, regs)
 }

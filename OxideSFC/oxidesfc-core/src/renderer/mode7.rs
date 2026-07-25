@@ -2,8 +2,7 @@
 //! screen-over/flip behavior, and the layer draw for BG1 and EXTBG BG2.
 
 use super::color::direct_color;
-use super::{LAYER_BG1, SCREEN_WIDTH};
-use crate::cgram::Cgram;
+use super::{Band, Frame, Target, LAYER_BG1, SCREEN_WIDTH};
 use crate::ppu::PpuRegisters;
 use crate::vram::Vram;
 
@@ -65,7 +64,7 @@ pub(super) fn mode7_sample(vram: &Vram, regs: &PpuRegisters, x: usize, y: usize)
         0 // outside the field repeats tile 0
     } else {
         // Map entry: low byte of word (tile_y * 128 + tile_x).
-        vram.read(((fy / 8) as u16 * 128 + (fx / 8) as u16) * 2)
+        vram.read(((fy / 8) * 128 + (fx / 8)) * 2)
     };
     // Pixel: high byte of word (tile * 64 + row * 8 + column).
     let pixel_word = (tile as u16) * 64 + (fy % 8) * 8 + (fx % 8);
@@ -76,17 +75,17 @@ pub(super) fn mode7_sample(vram: &Vram, regs: &PpuRegisters, x: usize, y: usize)
 /// priority) or its EXTBG BG2 (`extbg == true`: pixel bit 7 is a priority
 /// bit, bits 0-6 the color; only pixels matching `want_priority` draw).
 pub(super) fn draw_mode7_layer(
-    buf: &mut [u16],
-    layer_buf: &mut [u8],
-    vram: &Vram,
-    cgram: &Cgram,
-    regs: &PpuRegisters,
+    target: &mut Target,
+    frame: &Frame,
     extbg: bool,
     want_priority: u8,
     skip: &[bool; SCREEN_WIDTH],
-    y0: usize,
-    y1: usize,
+    band: Band,
 ) {
+let Frame { vram, cgram, regs, .. } = *frame;
+    let Band { y0, y1 } = band;
+    let buf = &mut *target.color;
+    let layer_buf = &mut *target.layer;
     let use_direct_color = regs.cgwsel & 0x01 != 0;
     // Mode 7 honors BG1's mosaic bit (and BG2's for the EXTBG layer) the
     // same way the tile-based path does: snap the sampled screen
@@ -98,8 +97,8 @@ pub(super) fn draw_mode7_layer(
         1
     };
     for py in y0..y1 {
-        for px in 0..SCREEN_WIDTH {
-            if skip[px] {
+        for (px, &masked) in skip.iter().enumerate() {
+            if masked {
                 continue; // window-masked
             }
             let Some(raw) = mode7_sample(vram, regs, px - px % mosaic_size, py - py % mosaic_size)

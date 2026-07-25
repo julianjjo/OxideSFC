@@ -4,6 +4,7 @@
 /// It consists of:
 /// - Primary OAM: 512 bytes (128 sprite entries × 4 bytes each)
 /// - Secondary OAM: 32 bytes (for sprite selection during rendering)
+///
 /// Total: 544 bytes
 /// 
 /// Each sprite entry is 4 bytes:
@@ -22,7 +23,6 @@
 /// packed 4-sprites-per-byte: low bit = X position bit 8, high bit = size).
 ///
 /// Address range: $00-$21F (544 bytes total)
-
 pub struct Oam {
     /// 544 bytes of OAM data (512 primary + 32 secondary)
     data: [u8; 544],

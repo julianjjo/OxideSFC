@@ -55,6 +55,39 @@ pub(super) const GAUSS: [i16; 512] = [
     1299, 1300, 1300, 1301, 1302, 1302, 1303, 1303, 1303, 1304, 1304, 1304, 1304, 1304, 1305, 1305,
 ];
 
+/// Everything a voice needs from the DSP register file to produce one sample.
+///
+/// Grouped into a struct rather than passed as eleven positional arguments,
+/// because this exact mapping is a place bugs have hidden before: an early
+/// version cached the per-voice registers into `Voice` fields with the
+/// register-to-field mapping offset by one slot, so `srcn` read VOL(L),
+/// volumes read ADSR2/GAIN, and every voice played the wrong sample at the
+/// wrong pitch. Named fields make that class of mistake visible at the call
+/// site.
+pub(super) struct VoiceConfig {
+    /// $x0/$x1: per-voice left/right volume, signed.
+    pub vol_l: i8,
+    pub vol_r: i8,
+    /// $x2/$x3: 14-bit pitch. 0x1000 plays at the native ~32kHz.
+    pub pitch: u16,
+    /// $x4: source number, an index into the sample directory at `dir`.
+    pub srcn: u8,
+    /// $x5/$x6/$x7: ADSR1, ADSR2 and GAIN.
+    pub adsr1: u8,
+    pub adsr2: u8,
+    pub gain: u8,
+    /// $5D: page holding the sample directory.
+    pub dir: u8,
+    /// The DSP's global envelope counter (see `envelope::read_counter`).
+    pub counter: u32,
+    /// This voice's NON ($3D) bit: play the shared noise LFSR instead of the
+    /// BRR sample. BRR playback still advances underneath, so clearing NON
+    /// resumes the sample where it would have been.
+    pub use_noise: bool,
+    /// The DSP's current noise value, used when `use_noise` is set.
+    pub noise: i32,
+}
+
 /// A single voice channel.
 ///
 /// This holds only genuine per-voice *state*; all configuration (volume,
@@ -156,36 +189,25 @@ impl Voice {
         self.endx = true;
     }
 
-    /// Generate one sample for this voice, reading its live configuration
-    /// straight from the DSP register bytes (`vol_l`/`vol_r` = $x0/$x1,
-    /// `pitch` = $x2/$x3 as a 14-bit value, `srcn` = $x4, `adsr1`/`adsr2`
-    /// = $x5/$x6, `gain` = $x7) plus the sample-directory page (`dir` =
-    /// $5D) and the DSP's global envelope `counter`.
-    ///
-    /// `use_noise` is this voice's NON ($3D) bit: when set, the voice's
-    /// source is the DSP's shared noise LFSR (`noise`) instead of its BRR
-    /// sample, exactly as on hardware. BRR playback still advances
-    /// underneath, so clearing NON resumes the sample where it would have
-    /// been.
+    /// Generate one sample for this voice.
     ///
     /// Returns `(left, right, enveloped)`, where `enveloped` is the
     /// post-envelope, pre-volume output that hardware feeds to the next
     /// voice's pitch modulation and to this voice's OUTX register.
-    pub fn sample(
-        &mut self,
-        ram: &[u8; 65536],
-        vol_l: i8,
-        vol_r: i8,
-        pitch: u16,
-        srcn: u8,
-        adsr1: u8,
-        adsr2: u8,
-        gain: u8,
-        dir: u8,
-        counter: u32,
-        use_noise: bool,
-        noise: i32,
-    ) -> (i32, i32, i32) {
+    pub(super) fn sample(&mut self, ram: &[u8; 65536], cfg: &VoiceConfig) -> (i32, i32, i32) {
+        let VoiceConfig {
+            vol_l,
+            vol_r,
+            pitch,
+            srcn,
+            adsr1,
+            adsr2,
+            gain,
+            dir,
+            counter,
+            use_noise,
+            noise,
+        } = *cfg;
         // Resolve start/loop addresses from the sample directory on the
         // first sample after key-on. The directory lives at page `dir<<8`;
         // each source number selects a 4-byte entry (start lo/hi, loop

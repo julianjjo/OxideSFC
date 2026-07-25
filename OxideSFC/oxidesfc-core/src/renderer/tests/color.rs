@@ -40,10 +40,12 @@ fn color_math_add_half_with_fixed_color_blends_the_backdrop() {
     cgram.write(0, (backdrop_color & 0xFF) as u8);
     cgram.write(1, (backdrop_color >> 8) as u8);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F; // full brightness, not blanked
-    regs.bgmode = 1;
-    regs.tm = 0x00; // nothing on the main screen except the backdrop
+    let mut regs = PpuRegisters {
+        inidisp: 0x0F, // full brightness, not blanked
+        bgmode: 1,
+        tm: 0x00, // nothing on the main screen except the backdrop
+        ..Default::default()
+    };
     // Color math: enable on backdrop (bit5), add (bit7=0), half (bit6).
     regs.cgadsub = 0x20 | 0x40;
     regs.cgwsel = 0x00; // blend with fixed COLDATA, not the subscreen
@@ -53,7 +55,7 @@ fn color_math_add_half_with_fixed_color_blends_the_backdrop() {
     // Expected: per channel (backdrop + fixed) >> 1, clamped 0..31.
     let er = (10 + 6) >> 1; // 8
     let eg = (20 + 4) >> 1; // 12
-    let eb = (0 + 0) >> 1; // 0
+    let eb = 0 >> 1; // 0
     let expected = bgr555_to_rgb8((er as u16) | ((eg as u16) << 5) | ((eb as u16) << 10));
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
@@ -107,10 +109,12 @@ fn color_math_exempts_sprites_on_obj_palettes_0_to_3() {
         cgram.write((e * 2 + 1) as u16, (sprite_color >> 8) as u8);
     }
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.obsel = 0x00;
-    regs.tm = 0x10; // sprites only on main
+    let mut regs = PpuRegisters {
+        inidisp: 0x0F,
+        obsel: 0x00,
+        tm: 0x10, // sprites only on main
+        ..Default::default()
+    };
     // Math: enable on OBJ (bit4), add, full. Operand = fixed color,
     // pure green (g=20) so the blended pixel visibly changes.
     regs.cgadsub = 0x10;
@@ -155,19 +159,21 @@ fn pseudo_hires_averages_main_and_subscreen_pixels() {
     vram.write(0x1000, 0x01);
     vram.write(0x1001, 0x04);
 
-    cgram.write(1 * 2, 0x1F); // color 1 = pure red (BGR555 0x001F)
-    cgram.write(1 * 2 + 1, 0x00);
+    cgram.write(2, 0x1F); // color 1 = pure red (BGR555 0x001F)
+    cgram.write(2 + 1, 0x00);
     cgram.write(17 * 2, 0x00); // color 17 = pure blue (BGR555 0x7C00)
     cgram.write(17 * 2 + 1, 0x7C);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.bgmode = 1;
+    let mut regs = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 1,
+        tm: 0x01, // main screen: BG1 (red)
+        ts: 0x02, // subscreen: BG2 (blue)
+        setini: 0x08, // pseudo-hires
+        ..Default::default()
+    };
     regs.bg_sc[0] = 0x04; // BG1 map at word 0x400
     regs.bg_sc[1] = 0x08; // BG2 map at word 0x800
-    regs.tm = 0x01; // main screen: BG1 (red)
-    regs.ts = 0x02; // subscreen: BG2 (blue)
-    regs.setini = 0x08; // pseudo-hires
 
     let fb = render_frame(&vram, &cgram, &oam_empty(), &regs);
     // avg(red 0x001F, blue 0x7C00) = r 15, g 0, b 15 = 0x3C0F.

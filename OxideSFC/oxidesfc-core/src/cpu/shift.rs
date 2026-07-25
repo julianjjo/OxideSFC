@@ -27,7 +27,7 @@ impl Cpu {
             } else {
                 self.p.remove(CpuFlags::CARRY);
             }
-            self.a = self.a << 1;
+            self.a <<= 1;
             self.update_nz_flags_16(self.a);
         } else {
             if (self.a & 0x80) != 0 {
@@ -50,7 +50,7 @@ impl Cpu {
             } else {
                 self.p.remove(CpuFlags::CARRY);
             }
-            self.a = self.a >> 1;
+            self.a >>= 1;
             self.update_nz_flags_16(self.a);
         } else {
             if (self.a & 0x01) != 0 {

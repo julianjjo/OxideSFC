@@ -23,14 +23,16 @@ fn mode7_identity_matrix_renders_the_field_one_to_one() {
     cgram.write(0x25 * 2, 0xE0);
     cgram.write(0x25 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.bgmode = 7;
-    regs.tm = 0x01; // BG1 only
-    regs.m7a = 0x0100; // identity matrix (1.0 in 8.8 fixed point)
-    regs.m7b = 0x0000;
-    regs.m7c = 0x0000;
-    regs.m7d = 0x0100;
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 7,
+        tm: 0x01, // BG1 only
+        m7a: 0x0100, // identity matrix (1.0 in 8.8 fixed point)
+        m7b: 0x0000,
+        m7c: 0x0000,
+        m7d: 0x0100,
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     let green = bgr555_to_rgb8(cgram.read_color(0x25));
@@ -57,14 +59,16 @@ fn mode7_scaling_matrix_transforms_coordinates() {
     cgram.write(0x25 * 2, 0xE0);
     cgram.write(0x25 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.bgmode = 7;
-    regs.tm = 0x01;
-    regs.m7a = 0x0200; // 2.0: horizontal zoom OUT (field moves 2px per screen px)
-    regs.m7b = 0;
-    regs.m7c = 0;
-    regs.m7d = 0x0100;
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 7,
+        tm: 0x01,
+        m7a: 0x0200, // 2.0: horizontal zoom OUT (field moves 2px per screen px)
+        m7b: 0,
+        m7c: 0,
+        m7d: 0x0100,
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     let green = bgr555_to_rgb8(cgram.read_color(0x25));
@@ -96,14 +100,16 @@ fn mode7_screen_over_transparent_vs_wrap() {
     cgram.write(0x25 * 2, 0xE0);
     cgram.write(0x25 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.bgmode = 7;
-    regs.tm = 0x01;
-    regs.m7a = 0x0100;
-    regs.m7b = 0;
-    regs.m7c = 0;
-    regs.m7d = 0x0100;
+    let mut regs = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 7,
+        tm: 0x01,
+        m7a: 0x0100,
+        m7b: 0,
+        m7c: 0,
+        m7d: 0x0100,
+        ..Default::default()
+    };
     // Scroll far negative: field y = -1024 + screen y, outside the field.
     regs.m7_vofs = (-1024i16 as u16) & 0x1FFF;
 
@@ -138,15 +144,17 @@ fn mode7_extbg_splits_bg2_by_pixel_priority_bit() {
     cgram.write(0x25 * 2, 0xE0); // BG2's color: green
     cgram.write(0x25 * 2 + 1, 0x03);
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F;
-    regs.bgmode = 7;
-    regs.tm = 0x03; // BG1 + BG2
-    regs.setini = 0x40; // EXTBG
-    regs.m7a = 0x0100;
-    regs.m7b = 0;
-    regs.m7c = 0;
-    regs.m7d = 0x0100;
+    let regs = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 7,
+        tm: 0x03, // BG1 + BG2
+        setini: 0x40, // EXTBG
+        m7a: 0x0100,
+        m7b: 0,
+        m7c: 0,
+        m7d: 0x0100,
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     let green = bgr555_to_rgb8(cgram.read_color(0x25));

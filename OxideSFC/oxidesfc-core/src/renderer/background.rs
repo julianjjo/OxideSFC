@@ -3,24 +3,21 @@
 
 use super::color::{average_bgr555, direct_color};
 use super::tile::decode_tile_row;
-use super::{LAYER_BG1, SCREEN_WIDTH};
-use crate::cgram::Cgram;
-use crate::ppu::PpuRegisters;
-use crate::vram::Vram;
+use super::{Band, Frame, Target, LAYER_BG1, SCREEN_WIDTH};
 
 pub(super) fn draw_bg_layer(
-    buf: &mut [u16],
-    layer_buf: &mut [u8],
-    vram: &Vram,
-    cgram: &Cgram,
-    regs: &PpuRegisters,
+    target: &mut Target,
+    frame: &Frame,
     bg: usize,
     depth: u8,
     want_priority: u8,
     skip: &[bool; SCREEN_WIDTH],
-    y0: usize,
-    y1: usize,
+    band: Band,
 ) {
+let Frame { vram, cgram, regs, .. } = *frame;
+    let Band { y0, y1 } = band;
+    let buf = &mut *target.color;
+    let layer_buf = &mut *target.layer;
     let mode = regs.bgmode & 0x07;
     // Modes 5/6 are the hi-res modes: BG pixels exist in a 512-dot
     // horizontal space (tiles forced 16 wide), collapsed into this
@@ -34,7 +31,7 @@ pub(super) fn draw_bg_layer(
     let tilemap_base_word = ((regs.bg_sc[bg] >> 2) as u16) * 0x400;
     let screen_size = regs.bg_sc[bg] & 0x03; // 0=32x32, 1=64x32, 2=32x64, 3=64x64
     let nba = if bg < 2 { regs.bg12nba } else { regs.bg34nba };
-    let nibble = if bg % 2 == 0 { nba & 0x0F } else { (nba >> 4) & 0x0F };
+    let nibble = if bg.is_multiple_of(2) { nba & 0x0F } else { (nba >> 4) & 0x0F };
     let tile_data_base_word = (nibble as u16) * 0x1000;
 
     let hofs = regs.bg_hofs[bg];
@@ -185,8 +182,8 @@ pub(super) fn draw_bg_layer(
 
     for py in y0..y1 {
         let eff_py = py - py % mosaic_size;
-        for px in 0..SCREEN_WIDTH {
-            if skip[px] {
+        for (px, &masked) in skip.iter().enumerate() {
+            if masked {
                 continue; // window-masked
             }
             let eff_px = px - px % mosaic_size;

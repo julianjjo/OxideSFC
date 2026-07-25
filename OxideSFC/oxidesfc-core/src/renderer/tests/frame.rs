@@ -48,8 +48,10 @@ fn forced_blank_renders_solid_black() {
     let vram = Vram::new();
     let cgram = Cgram::new();
     let oam = Oam::new();
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x80;
+    let regs = PpuRegisters {
+        inidisp: 0x80,
+        ..Default::default()
+    };
 
     let fb = render_frame(&vram, &cgram, &oam, &regs);
     assert_eq!(fb.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
@@ -79,11 +81,13 @@ fn per_scanline_register_bands_render_each_row_with_its_own_state() {
     cgram.write(2, 0x1F); // CGRAM 1 = red
     cgram.write(3, 0x00);
 
-    let mut top = PpuRegisters::default();
-    top.inidisp = 0x0F;
-    top.bgmode = 1;
+    let mut top = PpuRegisters {
+        inidisp: 0x0F,
+        bgmode: 1,
+        tm: 0x01,
+        ..Default::default()
+    };
     top.bg_sc[0] = 0x04; // tilemap word 0x400, 32x32
-    top.tm = 0x01;
 
     let mut bottom = top;
     bottom.bg_hofs[0] = 64; // scroll the tile out of view below the split
@@ -118,10 +122,12 @@ fn per_scanline_cgram_renders_each_row_with_its_own_palette() {
     let vram = Vram::new();
     let oam = Oam::new();
 
-    let mut regs = PpuRegisters::default();
-    regs.inidisp = 0x0F; // full brightness
-    regs.bgmode = 1;
-    regs.tm = 0x00; // backdrop-only frame
+    let regs = PpuRegisters {
+        inidisp: 0x0F, // full brightness
+        bgmode: 1,
+        tm: 0x00, // backdrop-only frame
+        ..Default::default()
+    };
     let lines = vec![regs; SCREEN_HEIGHT];
 
     let mut sky_top = Cgram::new();

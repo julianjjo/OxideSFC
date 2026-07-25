@@ -20,18 +20,15 @@ use crate::oam::Oam;
 use crate::vram::Vram;
 /// PPU mode/region
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PpuMode {
     /// NTSC mode (262 scanlines)
+    #[default]
     Ntsc,
     /// PAL mode (312 scanlines)
     Pal,
 }
 
-impl Default for PpuMode {
-    fn default() -> Self {
-        Self::Ntsc
-    }
-}
 
 /// Picture Processing Unit
 pub struct Ppu {

@@ -46,8 +46,8 @@ impl Cpu {
 
             self.update_nz_flags_16(self.a);
         } else {
-            let a_8 = (a & 0xFF) as u16;
-            let op_8 = (operand & 0xFF) as u16;
+            let a_8 = a & 0xFF;
+            let op_8 = operand & 0xFF;
             let result = a_8 + op_8 + (c as u16);
 
             self.a = (self.a & 0xFF00) | (result & 0xFF);

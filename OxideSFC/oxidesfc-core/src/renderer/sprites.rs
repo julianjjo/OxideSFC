@@ -2,11 +2,9 @@
 //! 32-sprite / 34-tile hardware limits, and priority-ordered rendering.
 
 use super::tile::decode_tile_row;
-use super::{LAYER_OBJ, LAYER_OBJ_PAL03, SCREEN_WIDTH};
-use crate::cgram::Cgram;
+use super::{Band, Frame, Target, LAYER_OBJ, LAYER_OBJ_PAL03, SCREEN_WIDTH};
 use crate::oam::Oam;
 use crate::ppu::PpuRegisters;
-use crate::vram::Vram;
 
 /// Per-scanline sprite evaluation results for one band: bit N of
 /// `masks[line - y0]` says sprite N survived the hardware's per-line
@@ -110,18 +108,17 @@ pub(super) fn sprite_size_pair(size_code: u8) -> ((u32, u32), (u32, u32)) {
 }
 
 pub(super) fn draw_sprites(
-    buf: &mut [u16],
-    layer_buf: &mut [u8],
-    vram: &Vram,
-    cgram: &Cgram,
-    oam: &Oam,
-    regs: &PpuRegisters,
+    target: &mut Target,
+    frame: &Frame,
     sprite_eval: &SpriteEval,
     want_priority: u8,
     skip: &[bool; SCREEN_WIDTH],
-    y0: usize,
-    y1: usize,
+    band: Band,
 ) {
+let Frame { vram, cgram, oam, regs } = *frame;
+    let Band { y0, y1 } = band;
+    let buf = &mut *target.color;
+    let layer_buf = &mut *target.layer;
     // OBSEL ($2101) layout is `sssnnbbb`: bits 0-2 = OBJ tile base (8K-word
     // steps), bits 3-4 = name select (gap to the second 256-tile table),
     // bits 5-7 = the size-pair code. An earlier version read the BASE from

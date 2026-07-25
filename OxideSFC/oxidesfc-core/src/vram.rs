@@ -5,7 +5,6 @@
 /// for 16-bit operations, but accessed as bytes here.
 /// 
 /// Address range: $0000-$FFFF (within PPU address space $2100-$21FF)
-
 pub struct Vram {
     /// 64KB VRAM data array. Boxed so this lives on the heap instead of
     /// inline in `Vram`/`Ppu`/`SystemBus` -- constructing a chain of

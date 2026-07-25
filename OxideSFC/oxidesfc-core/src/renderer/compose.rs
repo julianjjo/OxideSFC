@@ -7,7 +7,7 @@ use super::color::{average_bgr555, bgr555_to_rgb8, color_math};
 use super::mode7::draw_mode7_layer;
 use super::sprites::{draw_sprites, evaluate_sprites, SpriteEval};
 use super::window::window_line;
-use super::{bg_depths, LAYER_BACKDROP, SCREEN_HEIGHT, SCREEN_WIDTH};
+use super::{bg_depths, Band, Frame, Target, LAYER_BACKDROP, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::cgram::Cgram;
 use crate::oam::Oam;
 use crate::ppu::PpuRegisters;
@@ -23,7 +23,9 @@ pub fn render_frame(vram: &Vram, cgram: &Cgram, oam: &Oam, regs: &PpuRegisters) 
     let n = SCREEN_WIDTH * SCREEN_HEIGHT;
     let mut fb = vec![0u8; n * 4];
     let mut scratch = BandScratch::new();
-    let _ = render_band(&mut fb, &mut scratch, 0, SCREEN_HEIGHT, vram, cgram, oam, regs);
+    let band = Band { y0: 0, y1: SCREEN_HEIGHT };
+    let frame = Frame { vram, cgram, oam, regs };
+    let _ = render_band(&mut fb, &mut scratch, band, &frame);
     fb
 }
 
@@ -103,15 +105,17 @@ fn render_lines<'a>(
             || lines[y] != lines[band_start]
             || cgram_for_line(y).as_slice() != cgram_for_line(band_start).as_slice()
         {
+            let frame = Frame {
+                vram,
+                cgram: cgram_for_line(band_start),
+                oam,
+                regs: &lines[band_start],
+            };
             range_time_over |= render_band(
                 &mut fb,
                 &mut scratch,
-                band_start,
-                y,
-                vram,
-                cgram_for_line(band_start),
-                oam,
-                &lines[band_start],
+                Band { y0: band_start, y1: y },
+                &frame,
             );
             band_start = y;
         }
@@ -145,16 +149,9 @@ impl BandScratch {
 /// it, the subscreen (TS layers), blended per CGADSUB/CGWSEL. All math is
 /// done in native 5-bit-per-channel BGR555 space, matching the hardware,
 /// then converted to RGB888 with the INIDISP master-brightness scale.
-fn render_band(
-    fb: &mut [u8],
-    scratch: &mut BandScratch,
-    y0: usize,
-    y1: usize,
-    vram: &Vram,
-    cgram: &Cgram,
-    oam: &Oam,
-    regs: &PpuRegisters,
-) -> u8 {
+fn render_band(fb: &mut [u8], scratch: &mut BandScratch, band: Band, frame: &Frame) -> u8 {
+    let Frame { vram: _, cgram, oam, regs } = *frame;
+    let Band { y0, y1 } = band;
     if (regs.inidisp & 0x80) != 0 {
         // Forced blank: real hardware outputs solid black (and evaluates
         // no sprites, so no range/time-over flags either).
@@ -180,7 +177,14 @@ fn render_band(
         scratch.main[i] = backdrop;
         scratch.main_layer[i] = LAYER_BACKDROP;
     }
-    render_layers(&mut scratch.main, &mut scratch.main_layer, regs.tm, regs.tmw, vram, cgram, oam, regs, &sprite_eval, y0, y1);
+    render_layers(
+        &mut Target { color: &mut scratch.main, layer: &mut scratch.main_layer },
+        regs.tm,
+        regs.tmw,
+        frame,
+        &sprite_eval,
+        band,
+    );
 
     // Subscreen: needed when color math blends with it (CGWSEL bit 1) --
     // otherwise the fixed COLDATA color is the second operand -- and in
@@ -203,7 +207,14 @@ fn render_band(
             scratch.sub[i] = sub_backdrop;
             scratch.sub_layer[i] = LAYER_BACKDROP;
         }
-        render_layers(&mut scratch.sub, &mut scratch.sub_layer, regs.ts, regs.tsw, vram, cgram, oam, regs, &sprite_eval, y0, y1);
+        render_layers(
+            &mut Target { color: &mut scratch.sub, layer: &mut scratch.sub_layer },
+            regs.ts,
+            regs.tsw,
+            frame,
+            &sprite_eval,
+            band,
+        );
     }
 
     // Only the 6 per-layer enable bits participate in the layer gate --
@@ -337,18 +348,15 @@ fn composite_order(mode: u8, bg3_priority: bool) -> &'static [DrawOp] {
 /// written pixel's source layer in `layer_buf`. Transparent (palette
 /// index 0) pixels are skipped, leaving whatever is beneath.
 fn render_layers(
-    buf: &mut [u16],
-    layer_buf: &mut [u8],
+    target: &mut Target,
     mask: u8,
     window_mask: u8,
-    vram: &Vram,
-    cgram: &Cgram,
-    oam: &Oam,
-    regs: &PpuRegisters,
+    frame: &Frame,
     sprite_eval: &SpriteEval,
-    y0: usize,
-    y1: usize,
+    band: Band,
 ) {
+let regs = frame.regs;
+    let Band { y0: _, y1: _ } = band;
     // Per-layer window skip masks: a `true` at X means "don't draw this
     // layer's pixel there". Only layers selected in TMW/TSW (passed as
     // `window_mask`) are masked at all.
@@ -368,23 +376,23 @@ fn render_layers(
         // priority chart: BG2(lo), OBJ0, BG1, OBJ1, BG2(hi), OBJ2, OBJ3.
         let extbg = regs.setini & 0x40 != 0;
         if extbg && mask & 0x02 != 0 {
-            draw_mode7_layer(buf, layer_buf, vram, cgram, regs, true, 0, &skip[1], y0, y1);
+            draw_mode7_layer(target, frame, true, 0, &skip[1], band);
         }
         if mask & 0x10 != 0 {
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 0, &skip[4], y0, y1);
+            draw_sprites(target, frame, sprite_eval, 0, &skip[4], band);
         }
         if mask & 0x01 != 0 {
-            draw_mode7_layer(buf, layer_buf, vram, cgram, regs, false, 0, &skip[0], y0, y1);
+            draw_mode7_layer(target, frame, false, 0, &skip[0], band);
         }
         if mask & 0x10 != 0 {
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 1, &skip[4], y0, y1);
+            draw_sprites(target, frame, sprite_eval, 1, &skip[4], band);
         }
         if extbg && mask & 0x02 != 0 {
-            draw_mode7_layer(buf, layer_buf, vram, cgram, regs, true, 1, &skip[1], y0, y1);
+            draw_mode7_layer(target, frame, true, 1, &skip[1], band);
         }
         if mask & 0x10 != 0 {
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 2, &skip[4], y0, y1);
-            draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, 3, &skip[4], y0, y1);
+            draw_sprites(target, frame, sprite_eval, 2, &skip[4], band);
+            draw_sprites(target, frame, sprite_eval, 3, &skip[4], band);
         }
         return;
     }
@@ -396,13 +404,13 @@ fn render_layers(
             DrawOp::Bg(bg, tile_priority) => {
                 if let Some(depth) = depths[bg] {
                     if mask & (1 << bg) != 0 {
-                        draw_bg_layer(buf, layer_buf, vram, cgram, regs, bg, depth, tile_priority, &skip[bg], y0, y1);
+                        draw_bg_layer(target, frame, bg, depth, tile_priority, &skip[bg], band);
                     }
                 }
             }
             DrawOp::Obj(prio) => {
                 if mask & 0x10 != 0 {
-                    draw_sprites(buf, layer_buf, vram, cgram, oam, regs, sprite_eval, prio, &skip[4], y0, y1);
+                    draw_sprites(target, frame, sprite_eval, prio, &skip[4], band);
                 }
             }
         }

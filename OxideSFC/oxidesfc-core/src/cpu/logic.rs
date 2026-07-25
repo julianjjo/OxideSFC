@@ -10,7 +10,7 @@ impl Cpu {
         let operand = self.addr_immediate(bus, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a & operand;
+            self.a &= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | ((self.a as u8) & (operand as u8)) as u16;
@@ -27,7 +27,7 @@ impl Cpu {
         let operand = self.read_memory(bus, addr, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a & operand;
+            self.a &= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | ((self.a as u8) & (operand as u8)) as u16;
@@ -44,7 +44,7 @@ impl Cpu {
         let operand = self.read_memory(bus, addr, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a & operand;
+            self.a &= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | ((self.a as u8) & (operand as u8)) as u16;
@@ -60,7 +60,7 @@ impl Cpu {
         let operand = self.addr_immediate(bus, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a | operand;
+            self.a |= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | (((self.a as u8) | (operand as u8)) as u16);
@@ -77,7 +77,7 @@ impl Cpu {
         let operand = self.read_memory(bus, addr, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a | operand;
+            self.a |= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | (((self.a as u8) | (operand as u8)) as u16);
@@ -94,7 +94,7 @@ impl Cpu {
         let operand = self.read_memory(bus, addr, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a | operand;
+            self.a |= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | (((self.a as u8) | (operand as u8)) as u16);
@@ -110,7 +110,7 @@ impl Cpu {
         let operand = self.addr_immediate(bus, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a ^ operand;
+            self.a ^= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | (((self.a as u8) ^ (operand as u8)) as u16);
@@ -127,7 +127,7 @@ impl Cpu {
         let operand = self.read_memory(bus, addr, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a ^ operand;
+            self.a ^= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | (((self.a as u8) ^ (operand as u8)) as u16);
@@ -144,7 +144,7 @@ impl Cpu {
         let operand = self.read_memory(bus, addr, is_16bit)?;
         
         if is_16bit {
-            self.a = self.a ^ operand;
+            self.a ^= operand;
             self.update_nz_flags_16(self.a);
         } else {
             self.a = (self.a & 0xFF00) | (((self.a as u8) ^ (operand as u8)) as u16);

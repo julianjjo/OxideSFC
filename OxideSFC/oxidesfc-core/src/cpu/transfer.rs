@@ -8,7 +8,7 @@ impl Cpu {
     pub(super) fn op_tax(&mut self) -> BusResult<u8> {
         if self.p.contains(CpuFlags::INDEX_8BIT) {
             // 8-bit index mode: only transfer low byte
-            self.x = (self.a & 0xFF) as u16;
+            self.x = self.a & 0xFF;
             self.update_nz_flags_8(self.x as u8);
         } else {
             // 16-bit index mode: transfer full accumulator
@@ -36,7 +36,7 @@ impl Cpu {
     pub(super) fn op_tay(&mut self) -> BusResult<u8> {
         if self.p.contains(CpuFlags::INDEX_8BIT) {
             // 8-bit index mode: only transfer low byte
-            self.y = (self.a & 0xFF) as u16;
+            self.y = self.a & 0xFF;
             self.update_nz_flags_8(self.y as u8);
         } else {
             // 16-bit index mode: transfer full accumulator
@@ -64,7 +64,7 @@ impl Cpu {
     pub(super) fn op_tsx(&mut self) -> BusResult<u8> {
         if self.p.contains(CpuFlags::INDEX_8BIT) {
             // 8-bit index mode: only transfer low byte of SP
-            self.x = (self.sp & 0xFF) as u16;
+            self.x = self.sp & 0xFF;
             self.update_nz_flags_8(self.x as u8);
         } else {
             // 16-bit index mode: transfer full SP

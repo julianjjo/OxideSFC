@@ -47,7 +47,7 @@ impl SystemBus {
             // range, e.g. a plain `LDA $1234` with DB != 0 -- previously
             // unreachable only because nothing had run that far yet.
             if offset < 0x2000 {
-                let result = self.wram.read_u8(offset as u32)?;
+                let result = self.wram.read_u8(offset)?;
                 self.open_bus = result;
                 return Ok(result);
             }

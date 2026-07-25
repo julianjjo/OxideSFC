@@ -175,8 +175,8 @@ fn system_bus_rom_read() {
     // Create a ROM (2MB) that will definitely be HiROM
     let mut rom = vec![0x00; 0x200000];
     // Fill ROM with known pattern
-    for i in 0..rom.len() {
-        rom[i] = (i & 0xFF) as u8;
+    for (i, byte) in rom.iter_mut().enumerate() {
+        *byte = (i & 0xFF) as u8;
     }
     // Set HiROM mode byte at header position
     rom[0xFFD5] = 0x01; // Set bit 0 for HiROM

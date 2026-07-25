@@ -124,15 +124,16 @@ pub fn run() {
         folders_lock: Mutex::new(()),
     };
 
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init());
 
+    // Shadowed under `cfg` rather than reassigned into a `mut` binding, so a
+    // release build (where this plugin is absent) doesn't warn about a `mut`
+    // it never needs.
     #[cfg(debug_assertions)]
-    {
-        builder = builder.plugin(tauri_plugin_mcp_bridge::init());
-    }
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
 
     builder
         .manage(app_state)

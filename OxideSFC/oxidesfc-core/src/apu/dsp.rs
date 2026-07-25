@@ -3,7 +3,7 @@
 
 use super::clamp16;
 use super::envelope::{read_counter, EnvMode};
-use super::voice::Voice;
+use super::voice::{Voice, VoiceConfig};
 use super::SIMPLE_COUNTER_RANGE;
 
 /// DSP (Digital Signal Processor)
@@ -368,15 +368,20 @@ impl Dsp {
                     pitch as i32 + (((prev_enveloped >> 5) * pitch as i32) >> 10);
                 pitch = modulated.clamp(0, 0x3FFF) as u16;
             }
-            let srcn = self.regs[base + 4];
-            let adsr1 = self.regs[base + 5];
-            let adsr2 = self.regs[base + 6];
-            let gain = self.regs[base + 7];
-            let use_noise = non & (1 << i) != 0;
-            let (left, right, enveloped) = self.voices[i].sample(
-                ram, vol_l, vol_r, pitch, srcn, adsr1, adsr2, gain, dir, counter, use_noise,
+            let cfg = VoiceConfig {
+                vol_l,
+                vol_r,
+                pitch,
+                srcn: self.regs[base + 4],
+                adsr1: self.regs[base + 5],
+                adsr2: self.regs[base + 6],
+                gain: self.regs[base + 7],
+                dir,
+                counter,
+                use_noise: non & (1 << i) != 0,
                 noise,
-            );
+            };
+            let (left, right, enveloped) = self.voices[i].sample(ram, &cfg);
             prev_enveloped = enveloped;
             // Hardware exposes the running envelope level and the voice's
             // post-envelope output in ENVX ($x8) and OUTX ($x9). Sound
