@@ -78,9 +78,19 @@ That said, several hardware-accuracy improvements were implemented using [snes9x
 
 The same approach was later taken with [bsnes](https://github.com/bsnes-emu/bsnes) (C++, byuu/Near and the bsnes-emu maintainers), whose accuracy is the reference the audio and video work was measured against. Behavior studied there and re-implemented independently in Rust includes: the DSP's noise LFSR and how NON substitutes it for a voice's BRR source, pitch modulation (PMON), per-voice 16-bit accumulator saturation, the ADSR envelope's rate/offset gating tables, mode 7's coordinate clipping, direct-color's bit layout, the color-math rules that decide when the half-result is skipped and what the sub screen's backdrop is (`PPU::Line::pixel`), and the header byte → video standard table that tells a PAL cartridge from an NTSC one (`SuperFamicom::videoRegion`). The ±0.5% dynamic-rate-control approach in the audio worklet is the technique bsnes, snes9x and RetroArch all converged on.
 
-Two pieces are not re-implementations but direct transcriptions, because they are fixed hardware data rather than logic: the DSP's 512-entry gaussian interpolation table, and the exact shift/filter arithmetic of the BRR block decoder. Both come from the `SPC_DSP` reference implementation that originates with blargg's `snes_spc` and ships in bsnes — the same decoder reused across most SNES emulators. **If you redistribute OxideSFC, check that its license is compatible with those sources** (bsnes is GPLv3, `snes_spc` is LGPL); this repository currently declares MIT in `oxidesfc-frontend/Cargo.toml` and ships no `LICENSE` file, which is a gap that needs resolving before any binary release is distributed under those terms.
+Three things are transcribed rather than re-implemented, because they are the SNES DSP's own data and not anybody's logic: the 512-entry gaussian interpolation table, and the envelope rate and offset tables. Reading them out of a working emulator is easier than reading them off the die, and they appear identically in emulators released under MIT, BSD, GPL and public-domain terms alike. One piece is closer to the line: the BRR block decoder's exact shift/filter arithmetic follows the `SPC_DSP` reference implementation (blargg's `snes_spc`, as shipped in bsnes) step for step, because getting that arithmetic subtly wrong is audible and hard to spot. See [Licensing](#licensing).
 
 Many thanks to the snes9x and bsnes teams, and to the SNES documentation community (fullsnes, anomie's docs, the SNESdev wiki) whose work makes accurate emulation possible.
+
+## Licensing
+
+OxideSFC is released under the **MIT License** — see [`LICENSE`](LICENSE).
+
+One caveat worth stating plainly rather than burying, since this project publishes binaries. As noted in [Acknowledgments](#acknowledgments), the BRR decoder's shift/filter arithmetic closely follows the `SPC_DSP` reference implementation, which is LGPL as blargg's `snes_spc` and GPLv3 as shipped in bsnes — neither of which is MIT. The hardware tables alongside it are a different matter: factual data measured from a chip isn't an author's creative expression, which is why the same tables sit in emulators under every license going.
+
+If you intend to redistribute this under MIT and want that ambiguity gone, the fix is small and self-checking: rewrite `apu/brr.rs`'s filter arithmetic from the hardware description in fullsnes and anomie's DSP docs rather than from existing code. The BRR tests already pin the decoded output, including the nibble order and the filter behavior across block boundaries, so a clean-room rewrite either matches them or it doesn't.
+
+This is a description of where the code came from, not legal advice.
 
 ## Legal
 
