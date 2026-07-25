@@ -72,11 +72,15 @@ Unit tests cover the CPU, SPC700, PPU, DMA, and bus in isolation (every opcode o
 
 ## Acknowledgments
 
-OxideSFC is an **original emulator implementation written from scratch in Rust — it is not a port** of any existing emulator, and it shares no code with one.
+OxideSFC is an **original emulator implementation written from scratch in Rust — it is not a port** of any existing emulator. Every subsystem was written here, with two narrow exceptions that are fixed hardware data rather than logic and are called out explicitly at the end of this section.
 
 That said, several hardware-accuracy improvements were implemented using [snes9x](https://github.com/snes9xgit/snes9x) (C++, snes9x team) as a *behavioral reference*: its source code documents, in working form, many S-CPU/PPU details that took the snes9x developers years of hardware research to get right. Areas where snes9x's behavior was studied and re-implemented independently in Rust include: NMI/IRQ timer edge cases (H/V timer trigger positions, NMI-enable-during-vblank), CPU and PPU open-bus behavior (including the two separate PPU MDRs), WRAM refresh stalls, DMA/HDMA timing overheads and frame scheduling, the VRAM read prefetch buffer and VMAIN address remapping, OAM write latching and sprite priority rotation, per-scanline sprite limits (STAT77 range/time-over), and offset-per-tile.
 
-Many thanks to the snes9x team and to the SNES documentation community (fullsnes, anomie's docs, the SNESdev wiki) whose work makes accurate emulation possible.
+The same approach was later taken with [bsnes](https://github.com/bsnes-emu/bsnes) (C++, byuu/Near and the bsnes-emu maintainers), whose accuracy is the reference the audio and video work was measured against. Behavior studied there and re-implemented independently in Rust includes: the DSP's noise LFSR and how NON substitutes it for a voice's BRR source, pitch modulation (PMON), per-voice 16-bit accumulator saturation, the ADSR envelope's rate/offset gating tables, mode 7's coordinate clipping, direct-color's bit layout, the color-math rules that decide when the half-result is skipped and what the sub screen's backdrop is (`PPU::Line::pixel`), and the header byte → video standard table that tells a PAL cartridge from an NTSC one (`SuperFamicom::videoRegion`). The ±0.5% dynamic-rate-control approach in the audio worklet is the technique bsnes, snes9x and RetroArch all converged on.
+
+Two pieces are not re-implementations but direct transcriptions, because they are fixed hardware data rather than logic: the DSP's 512-entry gaussian interpolation table, and the exact shift/filter arithmetic of the BRR block decoder. Both come from the `SPC_DSP` reference implementation that originates with blargg's `snes_spc` and ships in bsnes — the same decoder reused across most SNES emulators. **If you redistribute OxideSFC, check that its license is compatible with those sources** (bsnes is GPLv3, `snes_spc` is LGPL); this repository currently declares MIT in `oxidesfc-frontend/Cargo.toml` and ships no `LICENSE` file, which is a gap that needs resolving before any binary release is distributed under those terms.
+
+Many thanks to the snes9x and bsnes teams, and to the SNES documentation community (fullsnes, anomie's docs, the SNESdev wiki) whose work makes accurate emulation possible.
 
 ## Legal
 
