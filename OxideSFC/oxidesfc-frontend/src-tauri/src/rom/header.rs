@@ -88,7 +88,8 @@ pub enum Country {
     #[default]
     Unknown,
     Japan,
-    USA,
+    #[serde(rename = "USA")]
+    Usa,
     Europe,
     Scandinavia,
     France,
@@ -108,7 +109,7 @@ impl Country {
     pub fn from_byte(byte: u8) -> Self {
         match byte {
             0x00 => Country::Japan,
-            0x01 => Country::USA,
+            0x01 => Country::Usa,
             0x02 => Country::Europe,
             0x03 => Country::Scandinavia,
             0x04 => Country::France,
@@ -129,7 +130,7 @@ impl Country {
         match self {
             Country::Unknown => "Unknown",
             Country::Japan => "Japan",
-            Country::USA => "USA",
+            Country::Usa => "USA",
             Country::Europe => "Europe",
             Country::Scandinavia => "Scandinavia",
             Country::France => "France",
@@ -202,7 +203,7 @@ mod tests {
     #[test]
     fn test_country_detection() {
         assert_eq!(Country::from_byte(0x00), Country::Japan);
-        assert_eq!(Country::from_byte(0x01), Country::USA);
+        assert_eq!(Country::from_byte(0x01), Country::Usa);
         assert_eq!(Country::from_byte(0x02), Country::Europe);
     }
 }

@@ -207,11 +207,9 @@ mod tests {
     /// (or the first ROM in the archive, via `unwrap_or`).
     #[test]
     fn test_extension_preference_is_case_insensitive() {
-        let rom_files = vec![
-            RomInArchive { filename: "Backup.SMC".to_string(), size: 10 },
+        let rom_files = [RomInArchive { filename: "Backup.SMC".to_string(), size: 10 },
             RomInArchive { filename: "Game.SFC".to_string(), size: 20 },
-            RomInArchive { filename: "Other.FIG".to_string(), size: 30 },
-        ];
+            RomInArchive { filename: "Other.FIG".to_string(), size: 30 }];
 
         let ends_with_ext_ci = |r: &&RomInArchive, ext: &str| {
             Path::new(&r.filename)

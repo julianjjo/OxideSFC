@@ -1,5 +1,4 @@
 mod gamepad;
-mod keyboard;
 
 pub use gamepad::InputManager;
 

@@ -144,11 +144,11 @@ fn cpu_executes_genuine_boot_instructions_until_a_known_gap() {
                 // own genuine IPL boot ROM (see oxidesfc_core::apu) -- it
                 // must be ticked forward in lockstep with CPU cycles, same
                 // as a real frontend driving the emulator would.
-                bus.tick_apu(cycles as u32);
+                bus.tick_apu(cycles);
                 // Same for the PPU: real hardware fires NMI once per frame
                 // at vblank entry, which is what actually unblocks SMW's
                 // boot code (it spins on $4210/RDNMI waiting for vblank).
-                bus.tick_ppu(cycles as u32);
+                bus.tick_ppu(cycles);
                 dispatch_interrupts(&mut cpu, &mut bus);
                 steps_executed += 1;
             }
@@ -221,8 +221,8 @@ fn cpu_sustains_long_run_with_real_frame_and_state_progression() {
         unique_pcs.insert(((cpu.pb as u32) << 16) | (cpu.pc as u32));
         match cpu.step(&mut bus) {
             Ok(cycles) => {
-                bus.tick_apu(cycles as u32);
-                bus.tick_ppu(cycles as u32);
+                bus.tick_apu(cycles);
+                bus.tick_ppu(cycles);
                 if bus.take_pending_nmi() {
                     nmi_count += 1;
                     cpu.nmi(&mut bus).expect("NMI delivery must not fault mid-run");
@@ -330,8 +330,8 @@ fn real_dma_transfers_populate_vram_cgram_oam_with_genuine_cartridge_data() {
     for _ in 0..MAX_STEPS {
         match cpu.step(&mut bus) {
             Ok(cycles) => {
-                bus.tick_apu(cycles as u32);
-                bus.tick_ppu(cycles as u32);
+                bus.tick_apu(cycles);
+                bus.tick_ppu(cycles);
                 dispatch_interrupts(&mut cpu, &mut bus);
                 steps_executed += 1;
             }
@@ -397,8 +397,8 @@ fn real_rom_eventually_renders_a_visible_non_black_frame() {
     for _ in 0..MAX_STEPS {
         match cpu.step(&mut bus) {
             Ok(cycles) => {
-                bus.tick_apu(cycles as u32);
-                bus.tick_ppu(cycles as u32);
+                bus.tick_apu(cycles);
+                bus.tick_ppu(cycles);
                 dispatch_interrupts(&mut cpu, &mut bus);
                 steps_executed += 1;
             }
@@ -478,8 +478,8 @@ fn gamemode_advances_past_the_former_bank_ef_escape_point() {
 
         match cpu.step(&mut bus) {
             Ok(cycles) => {
-                bus.tick_apu(cycles as u32);
-                bus.tick_ppu(cycles as u32);
+                bus.tick_apu(cycles);
+                bus.tick_ppu(cycles);
                 dispatch_interrupts(&mut cpu, &mut bus);
                 steps_executed += 1;
             }
