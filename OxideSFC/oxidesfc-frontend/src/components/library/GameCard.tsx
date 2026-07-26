@@ -1,4 +1,4 @@
-import type { DragEvent } from 'react';
+import { useEffect, useState, type DragEvent } from 'react';
 import type { Game } from '../../stores/libraryStore';
 import { cartToneClass } from '../../domain/cartTone';
 import { displayTitle, formatRomSize, regionCode, regionTag } from '../../domain/romFormat';
@@ -44,6 +44,9 @@ export function GameCard({
   const tone = cartToneClass(game.title);
   const title = displayTitle(game.title);
   const art = coverSrc(game, coversDir);
+  // Reset per src so a re-fetched cover gets another chance.
+  const [artBroken, setArtBroken] = useState(false);
+  useEffect(() => setArtBroken(false), [art]);
 
   // Dragging a card onto a collection in the sidebar files it there. The card is
   // the drag source rather than a separate list, because the thing you want to
@@ -60,11 +63,23 @@ export function GameCard({
       draggable
       onDragStart={handleDragStart}
     >
-      {art && <span className="cart-spine" aria-hidden />}
+      {art && !artBroken && <span className="cart-spine" aria-hidden />}
 
-      <div className={`cart-label${art ? ' cart-label--art' : ''}`}>
-        {art ? (
-          <img src={art} alt="" className="cart-art" loading="lazy" />
+      <div className={`cart-label${art && !artBroken ? ' cart-label--art' : ''}`}>
+        {art && !artBroken ? (
+          <img
+            src={art}
+            alt=""
+            className="cart-art"
+            loading="lazy"
+            // Fall back to the cartridge label if the file behind `cover_file` is
+            // gone -- a moved data directory, or a cache clear whose database
+            // write failed. Without this the card rendered as a bare tinted
+            // rectangle with no title at all, and `gamesNeedingCovers` (which
+            // filters on `cover_file` being unset) reported "all covered" and
+            // disabled the only button that would have repaired it.
+            onError={() => setArtBroken(true)}
+          />
         ) : (
           <h3 className="cart-title" title={game.title}>
             {title}

@@ -1,4 +1,5 @@
-import React, { forwardRef, useId } from 'react';
+import React, { forwardRef } from 'react';
+import { useControlId } from './useControlId';
 
 export interface ToggleProps
   extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type' | 'size'> {
@@ -40,8 +41,7 @@ export const Toggle = forwardRef<HTMLInputElement, ToggleProps>(
   ) => {
     // useId is stable across renders, unlike the Math.random() this used to
     // generate -- a fresh id on every render broke the label's htmlFor link.
-    const generatedId = useId();
-    const inputId = id || `toggle-${generatedId}`;
+    const inputId = useControlId(id, 'toggle');
 
     const emitChange = () => {
       if (disabled) return;

@@ -1,4 +1,5 @@
-import React, { forwardRef, useId } from 'react';
+import React, { forwardRef } from 'react';
+import { useControlId } from './useControlId';
 
 export interface SliderProps
   extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type' | 'size'> {
@@ -37,8 +38,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
     },
     ref
   ) => {
-    const generatedId = useId();
-    const inputId = id || `slider-${generatedId}`;
+    const inputId = useControlId(id, 'slider');
 
     const numericValue = Number(value);
     const numericMin = Number(min);

@@ -275,7 +275,15 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
   // the same vocabulary keyboard_mapping values use) and translate through
   // BUTTON_NAME_TO_MASK -- the single source of truth for the wire format.
   const gamepadEnabled = settings.controls?.gamepad_enabled ?? true;
-  const { getPressedButtons } = useGamepad({ enabled: gamepadEnabled });
+  // The deadzone has to be forwarded, not left to the hook's own default:
+  // `settings.controls.gamepad_deadzone` was persisted and given a slider while
+  // nothing read it, so raising it to cure stick drift changed nothing --
+  // `useGamepad` fell back to a hardcoded 0.15 every time.
+  const gamepadDeadzone = settings.controls?.gamepad_deadzone ?? 0.1;
+  const { getPressedButtons } = useGamepad({
+    enabled: gamepadEnabled,
+    deadzone: gamepadDeadzone,
+  });
 
   // useGamepad's getPressedButtons identity changes on every poll tick
   // (it closes over a `pressedButtons` useState that updates ~60x/sec while

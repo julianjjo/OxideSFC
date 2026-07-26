@@ -1,4 +1,5 @@
-import React, { forwardRef, useId } from 'react';
+import React, { forwardRef } from 'react';
+import { useControlId } from './useControlId';
 
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -36,8 +37,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     },
     ref
   ) => {
-    const generatedId = useId();
-    const inputId = id || `input-${generatedId}`;
+    const inputId = useControlId(id, 'input');
     const describedBy = error
       ? `${inputId}-error`
       : helperText
@@ -99,8 +99,7 @@ export interface TextAreaProps
 
 export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(
   ({ label, error, helperText, className = '', id, ...props }, ref) => {
-    const generatedId = useId();
-    const inputId = id || `textarea-${generatedId}`;
+    const inputId = useControlId(id, 'textarea');
 
     return (
       <div className="w-full">

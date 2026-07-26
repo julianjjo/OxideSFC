@@ -39,13 +39,19 @@ function fnv1a(input: string): number {
 }
 
 /**
- * Tone index (0-7) for a game. Keyed on the title, lowercased and stripped of
- * everything but alphanumerics, so the tone survives the cosmetic differences
- * between two dumps of the same game ("Super Metroid (USA)" and
- * "Super Metroid (U) [!]" land together).
+ * Tone index (0-7) for a game.
+ *
+ * The key drops parenthesised and bracketed groups before hashing, so the tone
+ * survives the cosmetic differences between two dumps of the same game:
+ * "Super Metroid (USA)" and "Super Metroid (U) [!]" land on the same tone.
+ * Stripping only non-alphanumerics was not enough -- it kept `usa` and `u` in
+ * the key, so those two hashed apart and the documented behaviour was false.
  */
 export function cartToneIndex(title: string): number {
-  const key = title.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const key = title
+    .replace(/[([][^)\]]*[)\]]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
   return fnv1a(key || title) % CART_TONE_COUNT;
 }
 

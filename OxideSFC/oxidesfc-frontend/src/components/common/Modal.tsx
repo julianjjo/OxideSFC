@@ -1,5 +1,17 @@
-import React, { useEffect, useCallback, useRef } from 'react';
+import React, { useEffect, useCallback, useId, useRef } from 'react';
 import { Button } from './Button';
+
+/**
+ * Open modals, innermost last.
+ *
+ * Escape must only reach the topmost dialog. Every open `Modal` attaches its own
+ * `document` keydown listener, so without a stack a nested confirmation and its
+ * parent both fired: backing out of "Remove from library" with Escape also closed
+ * the game details panel behind it and dumped the user back to the shelf.
+ * `stopPropagation` cannot fix that — both listeners are on `document`, so
+ * neither is in the other's propagation path.
+ */
+const openModals: symbol[] = [];
 
 export interface ModalProps {
   isOpen: boolean;
@@ -33,20 +45,34 @@ export function Modal({
   showCloseButton = true,
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  // Identity for the open-modal stack. A ref so it survives re-renders and stays
+  // unique per instance.
+  const stackTokenRef = useRef<symbol>(Symbol('modal'));
+  // Unique per instance, so two dialogs open at once do not both claim
+  // `id="modal-title"` -- which had them share one id and made every
+  // `aria-labelledby` resolve to the first, announcing the wrong dialog's name.
+  const titleId = `modal-title-${useId()}`;
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
+      if (e.key !== 'Escape') return;
+      // Only the innermost dialog reacts.
+      if (openModals[openModals.length - 1] !== stackTokenRef.current) return;
+      onClose();
     },
     [onClose]
   );
 
   useEffect(() => {
     if (!isOpen) return;
+    const token = stackTokenRef.current;
+    openModals.push(token);
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      const index = openModals.lastIndexOf(token);
+      if (index !== -1) openModals.splice(index, 1);
+    };
   }, [isOpen, handleKeyDown]);
 
   // Move focus into the dialog on open so keyboard users land inside it rather
@@ -75,13 +101,13 @@ export function Modal({
         className={`panel pinstripe-top animate-slide-in relative flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden shadow-lg ${SIZES[size]}`}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={title ? 'modal-title' : undefined}
+        aria-labelledby={title ? titleId : undefined}
       >
         {(title || showCloseButton) && (
           <div className="flex items-start justify-between gap-4 border-b border-line px-5 pb-4 pt-5">
             <div className="min-w-0">
               {title && (
-                <h2 id="modal-title" className="display-md truncate text-ink">
+                <h2 id={titleId} className="display-md truncate text-ink">
                   {title}
                 </h2>
               )}

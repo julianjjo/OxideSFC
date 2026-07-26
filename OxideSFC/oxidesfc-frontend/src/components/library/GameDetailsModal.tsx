@@ -45,6 +45,7 @@ export function GameDetailsModal({
 }: GameDetailsModalProps) {
   const [playSeconds, setPlaySeconds] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [artBroken, setArtBroken] = useState(false);
 
   // Tracks which game the in-flight play-time request belongs to, so a response
   // for a game the user has since navigated away from is discarded instead of
@@ -52,6 +53,11 @@ export function GameDetailsModal({
   const requestedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Give a new game's art a fresh chance to load. This has to live here rather
+    // than beside the `art` computation below, which sits after an early return --
+    // a hook there would be called conditionally.
+    setArtBroken(false);
+
     if (!game) {
       setPlaySeconds(null);
       return;
@@ -122,9 +128,14 @@ export function GameDetailsModal({
             <div
               className={`cart ${cartToneClass(game.title)} pointer-events-none`}
             >
-              <div className={`cart-label${art ? ' cart-label--art' : ''}`}>
-                {art ? (
-                  <img src={art} alt="" className="cart-art" />
+              <div className={`cart-label${art && !artBroken ? ' cart-label--art' : ''}`}>
+                {art && !artBroken ? (
+                  <img
+                    src={art}
+                    alt=""
+                    className="cart-art"
+                    onError={() => setArtBroken(true)}
+                  />
                 ) : (
                   <h3 className="cart-title">{title}</h3>
                 )}

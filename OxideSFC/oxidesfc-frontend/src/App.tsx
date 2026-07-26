@@ -11,7 +11,7 @@ function App() {
   const [currentView, setCurrentView] = useState<AppView>('library');
   const [showWizard, setShowWizard] = useState(false);
   const [wizardIsRerun, setWizardIsRerun] = useState(false);
-  const { settings, hasLoaded, loadSettings, updateSettings } = useSettingsStore();
+  const { settings, hasLoaded, loadSettings, updateSection } = useSettingsStore();
   const { isRunning, isPaused, currentGame } = useEmulationStore();
 
   // Load persisted settings once at startup so we know whether first-run
@@ -40,9 +40,13 @@ function App() {
     setShowWizard(false);
     setWizardIsRerun(false);
     try {
-      await updateSettings({
-        general: { ...settings.general, has_completed_onboarding: true },
-      });
+      // `updateSection`, not a whole-`general` spread from this component's
+      // captured `settings`. The wizard has just finished saving its own values
+      // (language among them) and this runs immediately after, so spreading a
+      // pre-wizard snapshot shallow-replaced the entire section and reverted
+      // them -- picking Español in onboarding was silently discarded the moment
+      // Finish was pressed.
+      await updateSection('general', { has_completed_onboarding: true });
     } catch (error) {
       console.error('Failed to persist onboarding completion:', error);
     }

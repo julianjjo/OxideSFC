@@ -24,21 +24,26 @@ interface FilterSidebarProps {
 }
 
 /**
- * Region values, matching the lowercased form of the backend's `Game.country`
- * string (see `Country::as_str()` in src-tauri/src/rom/header.rs) so counts from
- * `get_filter_counts` can be looked up case-insensitively.
+ * A region facet, derived from what the library actually contains.
  *
- * Only regions the backend can actually report are listed. The previous version
- * also offered Korea and International, which have no corresponding `Country`
- * variant -- they were permanently empty checkboxes that could only ever filter
- * the library down to nothing.
+ * Deliberately not a hardcoded list. `Country::as_str()` (src-tauri/src/rom/
+ * header.rs) can return 16 different strings — Scandinavia, France, Germany,
+ * Italy, Spain, Netherlands, Belgium, United Kingdom, Canada, Australia, Other
+ * and Unknown among them — and an earlier hardcoded four (USA/Japan/Europe/
+ * Brazil) left every other region unreachable even though `get_filter_counts`
+ * was counting it. A German or French PAL collection matched none of the four
+ * and got a facet with nothing selectable in it.
+ *
+ * Building the list from the counts also removes the need to decide what to do
+ * with empty regions: a region that no game reports simply is not a facet.
  */
-const REGIONS: Array<{ value: string; label: string }> = [
-  { value: 'usa', label: 'USA' },
-  { value: 'japan', label: 'Japan' },
-  { value: 'europe', label: 'Europe' },
-  { value: 'brazil', label: 'Brazil' },
-];
+interface RegionFacet {
+  /** Lowercased `Game.country`, which is what the filter compares against. */
+  value: string;
+  /** The backend's own spelling, used as the visible label. */
+  label: string;
+  count: number;
+}
 
 const QUICK_VIEWS: Array<{ value: QuickView; label: string; icon: React.ReactNode }> = [
   { value: 'all', label: 'All games', icon: <IconLibrary size={16} /> },
@@ -62,22 +67,22 @@ export function FilterSidebar({
   favoriteCount,
   refreshKey = 0,
 }: FilterSidebarProps) {
-  const [regionCounts, setRegionCounts] = useState<Record<string, number>>({});
+  const [regions, setRegions] = useState<RegionFacet[]>([]);
 
   useEffect(() => {
     invoke<{ regions: Record<string, number> }>('get_filter_counts')
       .then((counts) => {
-        // Keys come back capitalised to match `Country::as_str()`; normalise so
-        // they can be looked up by this file's lowercase values.
-        const normalized: Record<string, number> = {};
-        for (const [region, count] of Object.entries(counts.regions || {})) {
-          normalized[region.toLowerCase()] = count;
-        }
-        setRegionCounts(normalized);
+        const facets = Object.entries(counts.regions || {})
+          .filter(([, count]) => count > 0)
+          .map(([label, count]) => ({ value: label.toLowerCase(), label, count }))
+          // Biggest first, so the regions worth filtering by are at the top of a
+          // mixed collection; alphabetical within a tie for a stable order.
+          .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+        setRegions(facets);
       })
       .catch((error) => {
         console.error('Failed to load filter counts:', error);
-        setRegionCounts({});
+        setRegions([]);
       });
   }, [refreshKey]);
 
@@ -90,12 +95,6 @@ export function FilterSidebar({
 
   const quickViewCount = (view: QuickView) =>
     view === 'favorites' ? favoriteCount : view === 'all' ? totalCount : null;
-
-  // Regions with nothing behind them are shown but disabled, so the set of
-  // facets stays stable as the library grows instead of controls appearing and
-  // vanishing between scans.
-  const availableRegions = REGIONS.filter((r) => (regionCounts[r.value] ?? 0) > 0);
-  const shownRegions = availableRegions.length > 0 ? availableRegions : REGIONS;
 
   return (
     <div className="space-y-5">
@@ -140,35 +139,37 @@ export function FilterSidebar({
             </button>
           )}
         </div>
-        <ul className="space-y-0.5">
-          {shownRegions.map((region) => {
-            const count = regionCounts[region.value] ?? 0;
-            const checked = filters.regions.includes(region.value);
-            return (
-              <li key={region.value}>
-                <label
-                  className={`flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[0.8125rem] transition-colors ${
-                    count === 0
-                      ? 'cursor-not-allowed text-mute opacity-50'
-                      : checked
+        {regions.length === 0 ? (
+          <p className="px-2 text-[0.8125rem] leading-relaxed text-mute">
+            Regions appear here once your library has games to group.
+          </p>
+        ) : (
+          <ul className="space-y-0.5">
+            {regions.map((region) => {
+              const checked = filters.regions.includes(region.value);
+              return (
+                <li key={region.value}>
+                  <label
+                    className={`flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[0.8125rem] transition-colors ${
+                      checked
                         ? 'bg-accent-soft text-accent-text'
                         : 'text-dim hover:bg-raised hover:text-ink'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={count === 0}
-                    onChange={() => toggleRegion(region.value)}
-                    className="h-3.5 w-3.5 flex-none rounded border-line accent-[var(--accent-solid)]"
-                  />
-                  <span className="min-w-0 flex-1 truncate font-semibold">{region.label}</span>
-                  <span className="register flex-none">{count}</span>
-                </label>
-              </li>
-            );
-          })}
-        </ul>
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleRegion(region.value)}
+                      className="h-3.5 w-3.5 flex-none rounded border-line accent-[var(--accent-solid)]"
+                    />
+                    <span className="min-w-0 flex-1 truncate font-semibold">{region.label}</span>
+                    <span className="register flex-none">{region.count}</span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
     </div>
   );

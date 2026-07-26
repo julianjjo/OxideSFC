@@ -38,6 +38,8 @@ export function ContinueHero({
   const [playSeconds, setPlaySeconds] = useState<number | null>(null);
   const title = displayTitle(game.title);
   const art = coverSrc(game, coversDir);
+  const [artBroken, setArtBroken] = useState(false);
+  useEffect(() => setArtBroken(false), [art]);
 
   useEffect(() => {
     let active = true;
@@ -73,8 +75,13 @@ export function ContinueHero({
           className={`${cartToneClass(game.title)} relative w-52 flex-none overflow-hidden rounded-md border border-line`}
           style={{ background: 'var(--cart-tone)', aspectRatio: 'var(--cart-aspect)' }}
         >
-          {art ? (
-            <img src={art} alt="" className="h-full w-full object-cover" />
+          {art && !artBroken ? (
+            <img
+              src={art}
+              alt=""
+              className="h-full w-full object-cover"
+              onError={() => setArtBroken(true)}
+            />
           ) : (
             <span
               className="absolute inset-0 flex items-center px-3 text-[var(--cart-ink)]"

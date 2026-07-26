@@ -1,6 +1,7 @@
 @tailwind base;
 @tailwind components;
-@tailwind utilities;
+/* NOTE: `@tailwind utilities` is emitted at the *end* of this file, not here.
+   See the note above it. */
 
 /* Design tokens are imported from main.tsx (before this file) rather than with
    an @import here: postcss-import is not in the pipeline, so a CSS-level
@@ -811,7 +812,12 @@ body {
   color: var(--sfc-yellow);
 }
 
-/* Hover-revealed play affordance over the label. */
+/* Hover-revealed play affordance over the label.
+   `pointer-events: none` on the scrim is essential: it is a full-bleed
+   `inset: 0` overlay stacked level with the favourite star and later in the DOM,
+   so without it it hit-tested above the star and swallowed every click on it
+   (`opacity: 0` does not stop hit-testing, so it did so even before hover). The
+   button inside opts back in. */
 .cart-play {
   position: absolute;
   inset: 0;
@@ -821,6 +827,7 @@ body {
   justify-content: center;
   background: rgba(0, 0, 0, 0.34);
   opacity: 0;
+  pointer-events: none;
   transition: opacity var(--t-mid) var(--ease);
 }
 
@@ -830,6 +837,7 @@ body {
 }
 
 .cart-play-btn {
+  pointer-events: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1244,3 +1252,24 @@ body {
     transform: none;
   }
 }
+
+/* ===========================================================================
+   Utilities -- emitted last, on purpose
+   ===========================================================================
+   Tailwind's utilities have to come after the component primitives above,
+   because both are single-class selectors: at equal specificity the later rule
+   wins, so with `@tailwind utilities` at the top of the file every primitive
+   silently defeated the utility meant to adjust it. `.register`'s muted colour
+   beat `text-ink` at 15 sites (painting ~3.2:1 grey where high-contrast ink was
+   asked for) and `.field`'s `width: 100%` beat `w-56`/`w-48`/`w-44` at 6, so no
+   two selects in a settings panel lined up.
+
+   The idiomatic alternative -- wrapping the primitives in `@layer components`
+   -- is NOT usable here: Tailwind tree-shakes that layer against the content
+   globs, and several of these class names are only ever built at runtime
+   (`cart-tone-${n}`, `deck-btn--${accent}`), so they scan as unused and would be
+   purged. Plain CSS outside any layer is passed through untouched, which is why
+   it works today. Hence: keep the primitives unlayered, and put utilities last.
+   =========================================================================== */
+
+@tailwind utilities;

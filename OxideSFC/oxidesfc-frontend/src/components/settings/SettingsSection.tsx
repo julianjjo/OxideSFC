@@ -1,5 +1,6 @@
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { IconInfo } from '../common/icons';
+import { SettingRowIdContext } from '../common/useControlId';
 
 interface SettingsSectionProps {
   /**
@@ -48,20 +49,28 @@ export function SettingsSection({
 interface SettingRowProps {
   label: string;
   help?: string;
+  /** Override the generated id, for a row holding more than one control. */
   htmlFor?: string;
   children: ReactNode;
 }
 
 export function SettingRow({ label, help, htmlFor, children }: SettingRowProps) {
+  const generatedId = useId();
+  const controlId = htmlFor ?? `setting-${generatedId}`;
+
   return (
     <div className="field-row">
       <div className="min-w-0">
-        <label htmlFor={htmlFor} className="field-row-label">
+        <label htmlFor={controlId} className="field-row-label">
           {label}
         </label>
         {help && <p className="field-row-help max-w-prose">{help}</p>}
       </div>
-      <div className="field-row-control">{children}</div>
+      <div className="field-row-control">
+        <SettingRowIdContext.Provider value={controlId}>
+          {children}
+        </SettingRowIdContext.Provider>
+      </div>
     </div>
   );
 }

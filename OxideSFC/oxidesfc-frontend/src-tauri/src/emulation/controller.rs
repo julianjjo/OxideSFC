@@ -144,6 +144,11 @@ impl EmulationController {
     pub fn load_rom(&mut self, path: &str) -> Result<GameInfo, String> {
         info!("Loading ROM: {}", path);
 
+        // Same reason as in `start()`: loading another cartridge ends the previous
+        // session, and its accumulated seconds have to be banked before the
+        // `current_game_id` they belong to is replaced.
+        self.flush_play_time();
+
         let path_buf = PathBuf::from(path);
         if !path_buf.exists() {
             return Err(format!("File not found: {}", path));
@@ -288,6 +293,16 @@ impl EmulationController {
         if self.snes.is_none() {
             return Err("No ROM loaded".to_string());
         }
+
+        // Bank whatever the previous session accumulated before its identity is
+        // overwritten below. Nothing forces a stop between games: the quick menu's
+        // Settings item navigates away without pausing, and unmounting the play
+        // view only stops audio -- so `session_start` can still be live from
+        // another game when this runs. Without this flush its elapsed time was
+        // silently dropped while `record_play_start` happily counted a new
+        // session, which is how a game ended up reading "7 sessions / never
+        // played".
+        self.flush_play_time();
 
         self.is_running = true;
         self.is_paused = false;

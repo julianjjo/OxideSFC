@@ -18,6 +18,12 @@ interface CollectionFoldersProps {
   onSelect: (collectionId: string | null) => void;
   /** Called after a game is filed, so the library can refresh its counts. */
   onGameFiled?: (gameId: string, collectionId: string) => void;
+  /**
+   * Bumped by the library when membership changed elsewhere, so the per-collection
+   * counts reload. Without it, filing a game from the game details panel left the
+   * numbers here stale until the whole view remounted.
+   */
+  refreshKey?: number;
 }
 
 /**
@@ -33,6 +39,7 @@ export function CollectionFolders({
   selectedId,
   onSelect,
   onGameFiled,
+  refreshKey = 0,
 }: CollectionFoldersProps) {
   const [folders, setFolders] = useState<GameFolder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -56,7 +63,13 @@ export function CollectionFolders({
 
   useEffect(() => {
     void loadFolders();
-  }, [loadFolders]);
+  }, [loadFolders, refreshKey]);
+
+  // Dialogs close only on success, and a failure is shown rather than swallowed.
+  // Closing regardless discarded whatever the user had typed and left them with a
+  // dialog that had apparently worked but changed nothing, the reason for it
+  // buried in the console.
+  const [dialogError, setDialogError] = useState<string | null>(null);
 
   const handleCreate = async () => {
     const name = draftName.trim();
@@ -64,11 +77,13 @@ export function CollectionFolders({
     try {
       await invoke('create_folder', { name });
       await loadFolders();
+      setCreating(false);
+      setDraftName('');
+      setDialogError(null);
     } catch (error) {
       console.error('Failed to create collection:', error);
+      setDialogError('Could not create that collection. The name may already be taken.');
     }
-    setCreating(false);
-    setDraftName('');
   };
 
   const handleRename = async () => {
@@ -77,11 +92,13 @@ export function CollectionFolders({
     try {
       await invoke('rename_folder', { folderId: renaming.id, name });
       await loadFolders();
+      setRenaming(null);
+      setDraftName('');
+      setDialogError(null);
     } catch (error) {
       console.error('Failed to rename collection:', error);
+      setDialogError('Could not rename that collection.');
     }
-    setRenaming(null);
-    setDraftName('');
   };
 
   const handleDelete = async () => {
@@ -121,6 +138,7 @@ export function CollectionFolders({
           type="button"
           onClick={() => {
             setDraftName('');
+            setDialogError(null);
             setCreating(true);
           }}
           className="text-mute transition-colors hover:text-ink"
@@ -180,6 +198,7 @@ export function CollectionFolders({
                       type="button"
                       onClick={() => {
                         setDraftName(folder.name);
+                        setDialogError(null);
                         setRenaming(folder);
                       }}
                       className="rounded p-1 text-mute hover:text-ink"
@@ -207,7 +226,7 @@ export function CollectionFolders({
 
       <Modal
         isOpen={creating}
-        onClose={() => setCreating(false)}
+        onClose={() => { setCreating(false); setDialogError(null); }}
         title="New collection"
         size="sm"
         footer={
@@ -226,13 +245,14 @@ export function CollectionFolders({
           value={draftName}
           onChange={(e) => setDraftName(e.target.value)}
           placeholder="Platformers, RPGs to finish…"
+          error={dialogError ?? undefined}
           onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
         />
       </Modal>
 
       <Modal
         isOpen={renaming !== null}
-        onClose={() => setRenaming(null)}
+        onClose={() => { setRenaming(null); setDialogError(null); }}
         title="Rename collection"
         size="sm"
         footer={
@@ -250,6 +270,7 @@ export function CollectionFolders({
           label="Name"
           value={draftName}
           onChange={(e) => setDraftName(e.target.value)}
+          error={dialogError ?? undefined}
           onKeyDown={(e) => e.key === 'Enter' && handleRename()}
         />
       </Modal>

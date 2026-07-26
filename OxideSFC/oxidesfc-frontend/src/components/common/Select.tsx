@@ -1,4 +1,5 @@
-import React, { forwardRef, useId } from 'react';
+import React, { forwardRef } from 'react';
+import { useControlId } from './useControlId';
 
 export interface SelectOption {
   value: string;
@@ -59,12 +60,14 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
       inputSize = 'md',
       className = '',
       id,
+      // Destructured (rather than left in `props`) so the unsupported-value check
+      // below can see it; passed back to the element explicitly.
+      value,
       ...props
     },
     ref
   ) => {
-    const generatedId = useId();
-    const selectId = id || `select-${generatedId}`;
+    const selectId = useControlId(id, 'select');
 
     return (
       <div className="w-full">
@@ -77,6 +80,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           <select
             ref={ref}
             id={selectId}
+            value={value}
             aria-invalid={error ? true : undefined}
             className={`field appearance-none ${SIZES[inputSize]} ${
               error ? 'field--invalid' : ''
@@ -88,6 +92,20 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
                 {placeholder}
               </option>
             )}
+            {/*
+              Surface a persisted value that no longer has an option.
+              Without this the browser displays the *first* option while the
+              stored value stays whatever it was, and picking that option fires no
+              change event (`select.value` never changes), so the stale value is
+              unclearable through the UI. It bites on upgrade: a settings.json with
+              `shader: 'xbrz'` hits a list that is now only none|crt, because the
+              upscalers moved to the scale-mode control.
+            */}
+            {value !== undefined &&
+              value !== '' &&
+              !options.some((option) => option.value === value) && (
+                <option value={String(value)}>{String(value)} (unsupported)</option>
+              )}
             {options.map((option) => (
               <option key={option.value} value={option.value} disabled={option.disabled}>
                 {option.label}

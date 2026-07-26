@@ -175,7 +175,23 @@ export function ControllerSettings() {
     (b) => !boundKeys[b.key]
   ).length;
 
-  const deadzone = controls.gamepad_deadzone ?? 0.1;
+  // Held locally while dragging so the thumb tracks the pointer instead of a
+  // disk round-trip: binding `value` straight to the persisted setting queued
+  // ~50 serialised settings.json rewrites for one sweep across the range.
+  // Persisted on release (`onPointerUp`/`onKeyUp`), which is the same shape the
+  // audio panel's sliders use.
+  const [deadzoneDraft, setDeadzoneDraft] = useState<number | null>(null);
+  const persistedDeadzone = controls.gamepad_deadzone ?? 0.1;
+  const deadzone = deadzoneDraft ?? persistedDeadzone;
+
+  const commitDeadzone = () => {
+    if (deadzoneDraft === null || deadzoneDraft === persistedDeadzone) {
+      setDeadzoneDraft(null);
+      return;
+    }
+    void patchControls({ gamepad_deadzone: deadzoneDraft });
+    setDeadzoneDraft(null);
+  };
 
   return (
     <div className="space-y-4">
@@ -310,8 +326,11 @@ export function ControllerSettings() {
             value={deadzone}
             showMinMax
             valueDisplay={(v) => `${Math.round(v * 100)}%`}
-            onChange={(e) => patchControls({ gamepad_deadzone: parseFloat(e.target.value) })}
-            helperText="How far a stick must move before it registers. Raise it if a worn stick makes your character drift while untouched."
+            onChange={(e) => setDeadzoneDraft(parseFloat(e.target.value))}
+            onPointerUp={commitDeadzone}
+            onKeyUp={commitDeadzone}
+            onBlur={commitDeadzone}
+            helperText="How far a stick must move before it registers. Raise it if a worn stick makes your character drift while untouched. Applies to the next game you start."
           />
         </SettingBlock>
 

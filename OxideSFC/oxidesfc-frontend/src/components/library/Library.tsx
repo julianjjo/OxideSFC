@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useLibraryStore, type Game, type LibrarySortKey } from '../../stores/libraryStore';
@@ -56,6 +56,7 @@ export function Library({ onPlayGame }: LibraryProps) {
     removeGame,
     toggleFavorite,
     setSearchQuery,
+    setSortOrder,
     setViewMode,
     toggleSort,
   } = useLibraryStore();
@@ -63,7 +64,20 @@ export function Library({ onPlayGame }: LibraryProps) {
   const { settings } = useSettingsStore();
   const { loadRom, start } = useEmulationStore();
 
-  const [selectedGame, setSelectedGame] = useState<Game | null>(null);
+  // The open game is held by id, not as an object. Holding the object froze a
+  // snapshot taken when the modal opened: `toggleFavorite` maps a *new* Game into
+  // the store, so the modal's own favourite button never reflected its own click
+  // (and a second click, the natural response, silently undid the first). Looking
+  // it up from the store each render also keeps a newly fetched cover in sync.
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
+  const selectedGame = useMemo(
+    () => (selectedGameId ? games.find((g) => g.id === selectedGameId) ?? null : null),
+    [selectedGameId, games]
+  );
+  const setSelectedGame = useCallback(
+    (game: Game | null) => setSelectedGameId(game?.id ?? null),
+    []
+  );
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
   const [collectionId, setCollectionId] = useState<string | null>(null);
   const [collectionGameIds, setCollectionGameIds] = useState<Set<string> | null>(null);
@@ -86,22 +100,46 @@ export function Library({ onPlayGame }: LibraryProps) {
    *
    * `allowDownload` reflects the user's "Fetch metadata" preference, so the local
    * tier still runs for people who have opted out of network lookups.
+   *
+   * Cancellable and single-flight. A sweep can span hundreds of network lookups,
+   * so it needs to stop when the user leaves the screen (otherwise it keeps
+   * running and calls `setCoverProgress` on an unmounted tree) and it must not
+   * overlap itself when a second folder is added mid-sweep.
    */
+  const cancelCoverFetchRef = useRef(false);
+  const coverFetchRunningRef = useRef(false);
+
+  // Abort on unmount. Also the reason `shouldStop` is a ref rather than state:
+  // the workers read it between every lookup and must see the latest value
+  // without waiting for a re-render.
+  useEffect(
+    () => () => {
+      cancelCoverFetchRef.current = true;
+    },
+    []
+  );
+
   const runCoverFetch = useCallback(
     async (candidates: Game[]) => {
-      if (candidates.length === 0) return;
+      if (candidates.length === 0 || coverFetchRunningRef.current) return;
+      coverFetchRunningRef.current = true;
+      cancelCoverFetchRef.current = false;
       setCoverProgress({ done: 0, total: candidates.length, found: 0, current: '' });
       try {
         await fetchCovers(candidates, {
           allowDownload: settings.library?.use_metadata !== false,
-          onProgress: setCoverProgress,
+          onProgress: (progress) => {
+            if (!cancelCoverFetchRef.current) setCoverProgress(progress);
+          },
+          shouldStop: () => cancelCoverFetchRef.current,
         });
         // One reload at the end rather than per image: repainting the whole shelf
         // on every arrival would thrash a large library for no benefit.
-        await loadGames();
+        if (!cancelCoverFetchRef.current) await loadGames();
       } catch (error) {
         console.error('Cover fetch failed:', error);
       } finally {
+        coverFetchRunningRef.current = false;
         setCoverProgress(null);
       }
     },
@@ -183,9 +221,13 @@ export function Library({ onPlayGame }: LibraryProps) {
           comparison = a.play_count - b.play_count;
           break;
         case 'favorite':
+          // The tie-break is pre-multiplied by `direction` so the `* direction`
+          // applied to the result below cancels out and titles always read A-Z
+          // within each group. It was `* -direction`, which squared to -1 and
+          // made every favourite-sorted list run Z-A.
           comparison =
             (a.favorite ? 1 : 0) - (b.favorite ? 1 : 0) ||
-            displayTitle(a.title).localeCompare(displayTitle(b.title)) * -direction;
+            displayTitle(a.title).localeCompare(displayTitle(b.title)) * direction;
           break;
       }
       return comparison * direction;
@@ -236,12 +278,17 @@ export function Library({ onPlayGame }: LibraryProps) {
     });
     if (typeof selected !== 'string') return;
     try {
+      const knownBefore = new Set(games.map((g) => g.id));
       const result = await scanDirectory(selected, settings.library?.scan_recursive !== false);
       setCountsKey((k) => k + 1);
-      // Look up art for whatever the scan just added. Deliberately after the scan
-      // rather than inside it: network lookups would make scanning slow and
-      // failure-prone, and the shelf is already usable without covers.
-      void runCoverFetch(gamesNeedingCovers(result.games));
+      // Look up art for whatever the scan just *added*. `add_game_folder` returns
+      // the whole merged library, not the delta, so filtering against the ids we
+      // already had is what keeps this from re-sweeping the entire collection on
+      // every folder add. Deliberately after the scan rather than inside it:
+      // network lookups would make scanning slow and failure-prone, and the shelf
+      // is already usable without covers.
+      const added = result.games.filter((g) => !knownBefore.has(g.id));
+      void runCoverFetch(gamesNeedingCovers(added));
     } catch (error) {
       console.error('Failed to scan folder:', error);
     }
@@ -268,7 +315,16 @@ export function Library({ onPlayGame }: LibraryProps) {
     }
   };
 
-  const cycleSort = () => {
+  /**
+   * Advance to the next sort column.
+   *
+   * Direction is a *separate* control beside it. Routing both through one button
+   * meant `toggleSort` was always handed a different key, so its
+   * "same column flips the direction" branch was unreachable and the arrow the
+   * button rendered could never be changed -- in list mode you could at least
+   * click a column header twice, but in grid mode the direction was frozen.
+   */
+  const cycleSortColumn = () => {
     const order: LibrarySortKey[] = ['title', 'last_played', 'play_count', 'favorite'];
     toggleSort(order[(order.indexOf(sortBy) + 1) % order.length]);
   };
@@ -306,23 +362,44 @@ export function Library({ onPlayGame }: LibraryProps) {
         </span>
 
         {coverProgress && (
-          <span className="chip chip--accent flex-none" role="status">
-            Covers {coverProgress.done}/{coverProgress.total}
-            {coverProgress.found > 0 ? ` · ${coverProgress.found} found` : ''}
+          <span className="flex flex-none items-center gap-1.5">
+            <span className="chip chip--accent" role="status">
+              Covers {coverProgress.done}/{coverProgress.total}
+              {coverProgress.found > 0 ? ` · ${coverProgress.found} found` : ''}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                cancelCoverFetchRef.current = true;
+              }}
+              className="btn btn--ghost h-7 px-2 text-[0.75rem]"
+            >
+              Stop
+            </button>
           </span>
         )}
 
         <div className="flex-1" />
 
-        <button
-          type="button"
-          onClick={cycleSort}
-          className="btn btn--secondary h-8 px-3 text-[0.8125rem]"
-          title="Change sort order"
-        >
-          {SORT_LABELS[sortBy]}
-          {sortOrder === 'asc' ? <IconSortAsc /> : <IconSortDesc />}
-        </button>
+        <div className="seg" role="group" aria-label="Sort">
+          <button
+            type="button"
+            onClick={cycleSortColumn}
+            className="seg-item"
+            title="Sort by a different column"
+          >
+            {SORT_LABELS[sortBy]}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+            className="seg-item"
+            title={sortOrder === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending'}
+            aria-label={`Sort direction: ${sortOrder === 'asc' ? 'ascending' : 'descending'}`}
+          >
+            {sortOrder === 'asc' ? <IconSortAsc /> : <IconSortDesc />}
+          </button>
+        </div>
 
         <div className="seg" role="group" aria-label="View mode">
           <button
@@ -374,6 +451,7 @@ export function Library({ onPlayGame }: LibraryProps) {
               selectedId={collectionId}
               onSelect={setCollectionId}
               onGameFiled={() => setCountsKey((k) => k + 1)}
+              refreshKey={countsKey}
             />
           </aside>
         )}

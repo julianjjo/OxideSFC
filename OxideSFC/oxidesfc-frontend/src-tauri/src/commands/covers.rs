@@ -228,9 +228,26 @@ fn cached_image(dir: &Path, key: &str) -> Option<PathBuf> {
     })
 }
 
-/// Marker recording that no art could be found for this key.
+/// Marker recording that the CDN has no art for this key.
 fn miss_marker(dir: &Path, key: &str) -> PathBuf {
     dir.join(format!("{}.miss", key))
+}
+
+/// Delete cached images for `key` that are not the extension just written.
+///
+/// `cached_image` probes extensions in a fixed order, so leaving a stale
+/// `<key>.png` beside a freshly written `<key>.jpg` means the next lookup finds
+/// the *old* one and the cover silently reverts.
+fn prune_other_cached(dir: &Path, key: &str, keep_ext: &str) {
+    for ext in IMAGE_EXTENSIONS {
+        if ext == keep_ext {
+            continue;
+        }
+        let stale = dir.join(format!("{}.{}", key, ext));
+        if stale.is_file() {
+            let _ = fs::remove_file(stale);
+        }
+    }
 }
 
 /// Look for art the user already has, next to the ROM or in a sibling folder.
@@ -328,10 +345,18 @@ fn download_one(
 
             match looks_like_image(&bytes) {
                 Some(ext) => Ok(Some((bytes, ext))),
-                None => {
-                    warn!("Cover response for {} was not an image", release);
-                    Ok(None)
-                }
+                // An `Err`, not `Ok(None)`. A 200 carrying something that is not
+                // an image means we did not reach the CDN -- a captive portal, a
+                // corporate proxy or an ISP NXDOMAIN page answers every request
+                // with 200 + HTML. Reporting that as "no art exists" would write
+                // a permanent `.miss` for every game in the library on the first
+                // sweep from hotel wifi, recoverable only by clearing the cache,
+                // and would break this module's own rule that a failure to reach
+                // the CDN is never recorded as a miss.
+                None => Err(format!(
+                    "Cover host returned a {}-byte non-image body (captive portal or proxy?)",
+                    bytes.len()
+                )),
             }
         }
         // 404 is the CDN's way of saying it has nothing under that name, which is
@@ -373,7 +398,16 @@ fn finish(
 ///
 /// `allow_download` off restricts the search to files already on disk, so the
 /// local tier can be used with no network access at all.
-#[tauri::command]
+///
+/// `(async)` on a synchronous fn is load-bearing, not decoration: a bare
+/// `#[tauri::command]` defaults to `ExecutionContext::Blocking`, which runs the
+/// body on the webview's own thread. With a 10s connect and 30s read timeout
+/// tried across up to three candidate names, one unreachable lookup would freeze
+/// the entire window -- no repaint, no clicks, no Stop button -- and a sweep over
+/// a large offline library would hang it for minutes. `(async)` on a sync body
+/// dispatches to Tauri's blocking threadpool instead, which is what makes the
+/// frontend's five concurrent workers actually concurrent.
+#[tauri::command(async)]
 pub fn fetch_cover(
     game_id: String,
     allow_download: bool,
@@ -396,16 +430,16 @@ pub fn fetch_cover(
     }
 
     let marker = miss_marker(&dir, &key);
-    if !force && marker.is_file() {
-        return Ok(CoverResult {
-            game_id,
-            path: None,
-            file: None,
-            source: CoverSource::Missing,
-        });
-    }
 
     // Tier 1: local art.
+    //
+    // Checked BEFORE the miss marker, deliberately. The marker records that the
+    // *CDN* has nothing under this name; it says nothing about the user's own
+    // files, and gating this behind it meant that once a game had missed,
+    // dropping an image next to the ROM changed nothing for ever -- recoverable
+    // only by clearing the whole cache. It also restores the documented tier
+    // order, local before network. The cost is a few `is_file()` stats per
+    // uncovered game.
     if let Some(local) = find_local_art(&game.file_path, &release) {
         let ext = local
             .extension()
@@ -415,16 +449,33 @@ pub fn fetch_cover(
         let destination = dir.join(format!("{}.{}", key, ext));
         fs::copy(&local, &destination)
             .map_err(|e| format!("Failed to copy local cover: {}", e))?;
+        // Local art supersedes anything cached under another extension, and a
+        // recorded miss no longer applies.
+        prune_other_cached(&dir, &key, &ext);
+        let _ = fs::remove_file(&marker);
         info!("Cover for {} taken from {}", release, local.display());
         return finish(&game_id, destination, CoverSource::Local);
     }
 
     if !allow_download {
+        // Not `Unavailable`: nothing failed. The caller asked for local files
+        // only, and there were none -- reporting a failure made the UI tell
+        // people to "check your connection" right after they had deliberately
+        // turned online lookup off.
         return Ok(CoverResult {
             game_id,
             path: None,
             file: None,
-            source: CoverSource::Unavailable,
+            source: CoverSource::Missing,
+        });
+    }
+
+    if !force && marker.is_file() {
+        return Ok(CoverResult {
+            game_id,
+            path: None,
+            file: None,
+            source: CoverSource::Missing,
         });
     }
 
@@ -434,6 +485,7 @@ pub fn fetch_cover(
             let destination = dir.join(format!("{}.{}", key, ext));
             fs::write(&destination, &bytes)
                 .map_err(|e| format!("Failed to write cover: {}", e))?;
+            prune_other_cached(&dir, &key, ext);
             // A previous miss is now stale.
             let _ = fs::remove_file(&marker);
             info!("Downloaded cover for {}", release);
@@ -470,9 +522,20 @@ pub fn fetch_cover(
 /// Exposed because a name-matched cache has no way to notice that the CDN gained
 /// art for a release it previously lacked, so "try again from scratch" has to be
 /// something the user can ask for.
-#[tauri::command]
+///
+/// `(async)` for the same reason as `fetch_cover`: this walks a directory and
+/// unlinks every file in it, which has no business running on the UI thread.
+#[tauri::command(async)]
 pub fn clear_cover_cache() -> Result<usize, String> {
     let dir = covers_dir()?;
+
+    // Detach the library entries *before* deleting anything. The other order
+    // leaves every `cover_file` pointing at a file that is already gone if this
+    // write fails, and `gamesNeedingCovers` filters on `cover_file` being unset --
+    // so the library would report "all covered" while rendering blank tiles, with
+    // the repair button disabled.
+    set_cover_file_for_all(None)?;
+
     let mut removed = 0;
 
     for entry in fs::read_dir(&dir).map_err(|e| format!("Failed to read covers: {}", e))? {
@@ -492,7 +555,6 @@ pub fn clear_cover_cache() -> Result<usize, String> {
         }
     }
 
-    set_cover_file_for_all(None)?;
     info!("Cleared {} cover file(s)", removed);
     Ok(removed)
 }
