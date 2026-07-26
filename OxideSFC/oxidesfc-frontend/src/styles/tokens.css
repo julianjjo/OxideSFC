@@ -1,0 +1,262 @@
+/* ===========================================================================
+   OxideSFC design tokens
+   ===========================================================================
+
+   Every surface, line and text colour in the app resolves through the tokens
+   below. Components must never branch on the active theme in JS: they name a
+   token, and the theme swaps what that token means. (Before this file existed
+   the codebase carried ~219 `theme === 'light' ? ... : ...` ternaries spread
+   over 24 files, which is why the light theme had drifted into being only
+   half-implemented.)
+
+   Two axes, both driven by attributes on <html> (see applyAppearance() in
+   src/theme.ts):
+
+     data-theme="dark" | "light"     surfaces + text
+     data-accent="red" | "yellow" | "green" | "blue"    interactive hue
+
+   ---------------------------------------------------------------------------
+   Where the colours come from
+   ---------------------------------------------------------------------------
+   Dark is a warm, faintly violet charcoal -- the shadow inside a cartridge
+   slot -- deliberately NOT the blue-grey slate the app used to sit on, which
+   is the default of every Tailwind starter.
+
+   Light is the Super Famicom's own shell: that warm light grey with a hint of
+   beige. Panels stay near-white so text stays comfortable; the shell grey is
+   reserved for app chrome, which is what makes the light theme read as this
+   product rather than as a generic white dashboard.
+
+   The four accent hues are the Super Famicom's face buttons (A red, B yellow,
+   X blue, Y green). They already appeared as `--sfc-*` in the emulator's
+   control deck; this file promotes them to the whole app and gives each one
+   the full set of steps needed to carry an accent (solid fill, hover, tinted
+   background, border, and legible text both on the panel and on the fill).
+   =========================================================================== */
+
+:root {
+  /* -------------------------------------------------------------------------
+     Fixed brand hues. These do NOT follow the accent or the theme: they are
+     the four-colour signature (the pinstripe, the face-button tints), and
+     re-tinting them per theme would dissolve the identity.
+     ------------------------------------------------------------------------- */
+  --sfc-red: #e5484d;
+  --sfc-yellow: #f0b429;
+  --sfc-green: #3fa34d;
+  --sfc-blue: #4f74e3;
+
+  /* Type. No webfont is bundled or fetched -- this is a desktop app and a
+     blocking font request would be the slowest thing on screen. The stacks
+     resolve to Segoe UI Variable / Cascadia Mono on Windows, which are
+     genuinely characterful faces; personality is carried by scale, weight,
+     tracking and case rather than by an exotic family. */
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', ui-sans-serif, system-ui,
+    -apple-system, 'Helvetica Neue', sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI Variable Text',
+    'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  /* The "register" face: machine-true values only (256x224, 60 Hz, LoROM,
+     8 Mbit, $2100). Never used decoratively. */
+  --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace,
+    'SF Mono', Menlo, monospace;
+
+  /* Geometry */
+  /* Aspect ratio of a library card.
+     Two things agree on this number, which is why it is the one used:
+     the Libretro boxart scans are 512x357 (1.434) essentially without variation,
+     and a real Super Nintendo cartridge *label* is about 106x72mm (1.47). So a
+     landscape card both fills the artwork frame with no letterboxing and is a
+     more faithful cartridge proportion than the portrait box shape this started
+     out as. */
+  --cart-aspect: 1.434;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+
+  /* Motion. Every transition in the app references one of these so timing
+     stays consistent, and so `prefers-reduced-motion` can flatten them all
+     from a single place (see index.css). */
+  --t-fast: 120ms;
+  --t-mid: 200ms;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---------------------------------------------------------------------------
+   Surfaces + text: dark
+   --------------------------------------------------------------------------- */
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --void: #131217;
+  --panel: #1b1a21;
+  --raised: #232229;
+  --raised-2: #2c2a34;
+  --line: #302f38;
+  --line-strong: #403e4b;
+
+  --text: #ece9f2;
+  --text-dim: #a5a1b2;
+  --text-mute: #7b7889;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.6);
+
+  /* Glass surfaces (control deck, overlays). */
+  --glass: rgba(20, 19, 25, 0.86);
+  --scrim: rgba(6, 5, 9, 0.68);
+
+  /* Per-hue accent ramps for this theme. Selected into --accent-* below. */
+  --h-red-solid: #d13a3f;
+  --h-red-hover: #de4a4f;
+  --h-red-text: #ff9295;
+  --h-red-soft: rgba(229, 72, 77, 0.14);
+  --h-red-line: rgba(229, 72, 77, 0.38);
+  --h-red-on: #ffffff;
+
+  --h-yellow-solid: #f0b429;
+  --h-yellow-hover: #f6c247;
+  --h-yellow-text: #f8cf68;
+  --h-yellow-soft: rgba(240, 180, 41, 0.14);
+  --h-yellow-line: rgba(240, 180, 41, 0.38);
+  --h-yellow-on: #241c04;
+
+  --h-green-solid: #2f8c3d;
+  --h-green-hover: #38a047;
+  --h-green-text: #6fd67e;
+  --h-green-soft: rgba(63, 163, 77, 0.16);
+  --h-green-line: rgba(63, 163, 77, 0.4);
+  --h-green-on: #ffffff;
+
+  --h-blue-solid: #4f74e3;
+  --h-blue-hover: #6183ea;
+  --h-blue-text: #9db0f8;
+  --h-blue-soft: rgba(79, 116, 227, 0.16);
+  --h-blue-line: rgba(79, 116, 227, 0.4);
+  --h-blue-on: #ffffff;
+
+  /* Cartridge label tones -- see the .cart-* rules in index.css. Eight tones
+     derived from the four face-button hues (a deep and a bright reading of
+     each) so a shelf of ROMs with no cover art is still scannable, while
+     staying inside the console's own colour vocabulary. */
+  --cart-0: #b23a3f; /* red, deep      */
+  --cart-1: #e0763f; /* red-orange     */
+  --cart-2: #cf9a1e; /* yellow, deep   */
+  --cart-3: #a8ac2f; /* yellow-green   */
+  --cart-4: #2f8c46; /* green, deep    */
+  --cart-5: #2a9a86; /* green-teal     */
+  --cart-6: #3f63cf; /* blue, deep     */
+  --cart-7: #7a56c4; /* blue-violet    */
+  --cart-ink: #ffffff;
+  --cart-base: #26242c;
+}
+
+/* ---------------------------------------------------------------------------
+   Surfaces + text: light (Super Famicom shell)
+   --------------------------------------------------------------------------- */
+[data-theme='light'] {
+  color-scheme: light;
+
+  --void: #dbd7cf;
+  --panel: #f8f6f2;
+  --raised: #edeae3;
+  --raised-2: #e2ded5;
+  --line: #cec8bd;
+  --line-strong: #b5aea1;
+
+  --text: #1f1e1b;
+  --text-dim: #57544d;
+  --text-mute: #7c776c;
+
+  --shadow-sm: 0 1px 2px rgba(58, 52, 40, 0.14);
+  --shadow-md: 0 6px 20px rgba(58, 52, 40, 0.16);
+  --shadow-lg: 0 18px 50px rgba(58, 52, 40, 0.22);
+
+  --glass: rgba(248, 246, 242, 0.9);
+  --scrim: rgba(60, 55, 45, 0.42);
+
+  --h-red-solid: #bc272c;
+  --h-red-hover: #cb3237;
+  --h-red-text: #a01f24;
+  --h-red-soft: rgba(188, 39, 44, 0.1);
+  --h-red-line: rgba(188, 39, 44, 0.3);
+  --h-red-on: #ffffff;
+
+  --h-yellow-solid: #9c6b10;
+  --h-yellow-hover: #ab7716;
+  --h-yellow-text: #855a08;
+  --h-yellow-soft: rgba(156, 107, 16, 0.12);
+  --h-yellow-line: rgba(156, 107, 16, 0.32);
+  --h-yellow-on: #ffffff;
+
+  --h-green-solid: #21763a;
+  --h-green-hover: #288644;
+  --h-green-text: #1a5f2d;
+  --h-green-soft: rgba(33, 118, 58, 0.1);
+  --h-green-line: rgba(33, 118, 58, 0.3);
+  --h-green-on: #ffffff;
+
+  --h-blue-solid: #2f4fc4;
+  --h-blue-hover: #3a5bd2;
+  --h-blue-text: #2843a6;
+  --h-blue-soft: rgba(47, 79, 196, 0.1);
+  --h-blue-line: rgba(47, 79, 196, 0.28);
+  --h-blue-on: #ffffff;
+
+  --cart-0: #a6353a;
+  --cart-1: #cd6a34;
+  --cart-2: #b8871a;
+  --cart-3: #8f9328;
+  --cart-4: #27793c;
+  --cart-5: #218574;
+  --cart-6: #3555bd;
+  --cart-7: #6a49b0;
+  --cart-ink: #ffffff;
+  --cart-base: #ebe7e0;
+}
+
+/* ---------------------------------------------------------------------------
+   Accent selection
+   ---------------------------------------------------------------------------
+   `data-accent` picks which hue ramp the generic --accent-* tokens point at.
+   Because both themes define all four ramps, the accent and the theme are
+   fully independent: any of the eight combinations works.
+   --------------------------------------------------------------------------- */
+:root,
+[data-accent='blue'] {
+  --accent-solid: var(--h-blue-solid);
+  --accent-hover: var(--h-blue-hover);
+  --accent-text: var(--h-blue-text);
+  --accent-soft: var(--h-blue-soft);
+  --accent-line: var(--h-blue-line);
+  --accent-on: var(--h-blue-on);
+}
+
+[data-accent='red'] {
+  --accent-solid: var(--h-red-solid);
+  --accent-hover: var(--h-red-hover);
+  --accent-text: var(--h-red-text);
+  --accent-soft: var(--h-red-soft);
+  --accent-line: var(--h-red-line);
+  --accent-on: var(--h-red-on);
+}
+
+[data-accent='yellow'] {
+  --accent-solid: var(--h-yellow-solid);
+  --accent-hover: var(--h-yellow-hover);
+  --accent-text: var(--h-yellow-text);
+  --accent-soft: var(--h-yellow-soft);
+  --accent-line: var(--h-yellow-line);
+  --accent-on: var(--h-yellow-on);
+}
+
+[data-accent='green'] {
+  --accent-solid: var(--h-green-solid);
+  --accent-hover: var(--h-green-hover);
+  --accent-text: var(--h-green-text);
+  --accent-soft: var(--h-green-soft);
+  --accent-line: var(--h-green-line);
+  --accent-on: var(--h-green-on);
+}

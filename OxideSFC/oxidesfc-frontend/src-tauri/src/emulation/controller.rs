@@ -36,6 +36,19 @@ pub struct InputState {
     pub y: i8,
 }
 
+/// What one save-state slot currently holds, for the in-game save/load pickers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSlotInfo {
+    pub slot: u8,
+    pub occupied: bool,
+    /// Size of the snapshot on disk. `None` when the slot is free.
+    pub size_bytes: Option<u64>,
+    /// Last-write time as Unix milliseconds, so the frontend can render it in
+    /// the user's own locale and timezone. `None` when the slot is free, or when
+    /// the filesystem does not report a modification time.
+    pub saved_at_ms: Option<u64>,
+}
+
 
 pub struct EmulationController {
     snes: Option<Snes>,
@@ -181,6 +194,13 @@ impl EmulationController {
             );
         }
 
+        // Bank the outgoing session's seconds, now that the replacement is known
+        // good. Every `?` and early return above this point leaves the previous
+        // game loaded and running, so flushing before them would consume
+        // `session_start` for a swap that never happened and stop counting time
+        // for a game still on screen.
+        self.flush_play_time();
+
         self.snes = Some(snes);
         self.current_game = Some(game_info.clone());
 
@@ -276,10 +296,32 @@ impl EmulationController {
             return Err("No ROM loaded".to_string());
         }
 
+        // Bank whatever the previous session accumulated before its identity is
+        // overwritten below. Nothing forces a stop between games: the quick menu's
+        // Settings item navigates away without pausing, and unmounting the play
+        // view only stops audio -- so `session_start` can still be live from
+        // another game when this runs. Without this flush its elapsed time was
+        // silently dropped while `record_play_start` happily counted a new
+        // session, which is how a game ended up reading "7 sessions / never
+        // played".
+        self.flush_play_time();
+
         self.is_running = true;
         self.is_paused = false;
         self.current_game_id = game_id;
         self.session_start = Some(Instant::now());
+
+        // Stamp the library entry with this session. `flush_play_time` handles
+        // the accumulated *duration* on pause/stop, but nothing recorded that a
+        // session had happened at all, so `play_count` and `last_played` stayed
+        // at their scan-time defaults for the life of the library. A failure here
+        // must not stop the game from starting -- it is bookkeeping.
+        if let Some(ref game_id) = self.current_game_id {
+            if let Err(e) = crate::commands::library::record_play_start(game_id) {
+                warn!("Failed to record play session for {}: {}", game_id, e);
+            }
+        }
+
         self.last_pace = None;
         self.frame_debt = 0.0;
         // A previous run of this ROM may have left samples behind (stop()
@@ -478,20 +520,70 @@ impl EmulationController {
         }
     }
 
+    /// Directory holding the save-state slots.
+    ///
+    /// NOTE: slots are global, not per cartridge -- slot 1 is one file shared by
+    /// every game, so saving in one game overwrites another game's slot 1. The
+    /// payload itself only loads onto the cartridge it came from (the core's
+    /// snapshot excludes the ROM and `load_snapshot` rejects a mismatch), so the
+    /// failure is a refused load rather than corruption, but it is still a
+    /// surprise worth fixing by keying the filename on the game id.
+    fn save_dir() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("OxideSFC")
+            .join("saves")
+    }
+
+    fn slot_path(slot: u8) -> PathBuf {
+        Self::save_dir().join(format!("save_{}.state", slot))
+    }
+
+    /// Occupancy of every slot, for the in-game save/load pickers.
+    ///
+    /// The picker previously labelled all ten slots "Empty" unconditionally --
+    /// a hardcoded string, with a comment conceding that a real implementation
+    /// would show the save date. That made the list actively misleading: a slot
+    /// holding a state you cared about looked exactly like a free one.
+    pub fn list_save_states(slots: u8) -> Vec<SaveSlotInfo> {
+        (0..slots)
+            .map(|slot| {
+                let path = Self::slot_path(slot);
+                let metadata = std::fs::metadata(&path).ok();
+
+                let (size_bytes, saved_at_ms) = match &metadata {
+                    Some(meta) => {
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|delta| delta.as_millis() as u64);
+                        (Some(meta.len()), modified)
+                    }
+                    None => (None, None),
+                };
+
+                SaveSlotInfo {
+                    slot,
+                    occupied: metadata.is_some(),
+                    size_bytes,
+                    saved_at_ms,
+                }
+            })
+            .collect()
+    }
+
     pub fn save_state(&self, slot: u8) -> Result<(), String> {
         if let Some(ref snes) = self.snes {
-            let save_dir = dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("OxideSFC")
-                .join("saves");
+            let save_dir = Self::save_dir();
 
             std::fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
 
-            let save_file = save_dir.join(format!("save_{}.state", slot));
+            let save_file = Self::slot_path(slot);
             let state = snes.save_state();
-            
+
             std::fs::write(&save_file, state).map_err(|e| e.to_string())?;
-            
+
             info!("State saved to slot {}", slot);
             Ok(())
         } else {
@@ -504,13 +596,8 @@ impl EmulationController {
             return Err("No ROM loaded".to_string());
         }
 
-        let save_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("OxideSFC")
-            .join("saves");
+        let save_file = Self::slot_path(slot);
 
-        let save_file = save_dir.join(format!("save_{}.state", slot));
-        
         if !save_file.exists() {
             return Err(format!("No save state found in slot {}", slot));
         }

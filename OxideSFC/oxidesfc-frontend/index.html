@@ -1,12 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark" data-accent="blue">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OxideSFC</title>
   </head>
-  <body class="bg-slate-900 text-white">
+  <!-- The theme/accent attributes above are the app's defaults, set here so the
+       first paint already matches them; applyAppearance() in src/theme.ts
+       overwrites them once persisted settings load. The body carries no colour
+       utilities of its own -- it used to be pinned to `bg-slate-900 text-white`,
+       which the light theme had no way to override. -->
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -10,5 +10,5 @@ mod real_rom_tests;
 #[cfg(test)]
 mod region_tests;
 
-pub use controller::{EmulationController, GameInfo, InputState};
+pub use controller::{EmulationController, GameInfo, InputState, SaveSlotInfo};
 pub use video::VideoFrame;

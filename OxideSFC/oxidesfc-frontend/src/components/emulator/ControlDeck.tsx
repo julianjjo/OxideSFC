@@ -126,7 +126,7 @@ export function ControlDeck({
               className={`deck-status-dot ${isPaused ? 'deck-status-dot--paused' : 'deck-status-dot--running'}`}
               aria-hidden
             />
-            <span className="truncate text-sm font-semibold text-slate-100 max-w-[14rem]">
+            <span className="truncate text-sm font-semibold max-w-[14rem]">
               {gameTitle}
             </span>
           </div>

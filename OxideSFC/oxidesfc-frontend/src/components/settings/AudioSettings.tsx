@@ -1,235 +1,190 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { Toggle } from '../common/Toggle';
 import { Slider } from '../common/Slider';
-import { Select } from '../common/Select';
-import { getAudioService } from '../../services/audio';
+import { getAudioService, type AudioStats } from '../../services/audio';
+import { SettingsSection, SettingRow, SettingBlock, SettingNote } from './SettingsSection';
 
-// Latency options
-const LATENCY_OPTIONS = [
-  { value: '20', label: '20ms (Ultra Low)' },
-  { value: '50', label: '50ms (Low)' },
-  { value: '100', label: '100ms (Medium)' },
-  { value: '150', label: '150ms (High)' },
-  { value: '200', label: '200ms (Very High)' },
-];
+/** Buffer-target bounds, in ms of queued audio. */
+const LATENCY_MIN = 20;
+const LATENCY_MAX = 200;
 
-export function AudioSettings() {
-  const { settings, saveSettings } = useSettingsStore();
-  const theme = (settings.general.theme as 'dark' | 'light') || 'dark';
-  const audio = settings.audio;
+function latencyVerdict(ms: number): string {
+  if (ms < 40) return 'Very low — expect crackle if the host stutters';
+  if (ms <= 80) return 'Low — the recommended range';
+  if (ms <= 140) return 'Safe — audible delay on input';
+  return 'High — noticeable delay, only for slow hosts';
+}
 
-  // Local state for volume sliders (normalized to 0-100)
-  const [masterVolume, setMasterVolume] = useState(Math.round((audio.volume || 1) * 100));
-  const [sfxVolume, setSfxVolume] = useState(audio.sfx_volume ?? 100);
-  const [musicVolume, setMusicVolume] = useState(audio.music_volume ?? 100);
-  const [latency, setLatency] = useState(audio.latency || 60);
-  const [enableBuffering, setEnableBuffering] = useState(audio.buffering_enabled ?? true);
+/** Live readout of the audio pipeline. */
+function AudioTelemetry() {
+  const [stats, setStats] = useState<AudioStats | null>(null);
+  const [ready, setReady] = useState(false);
 
-  // Update local state when settings load
   useEffect(() => {
-    if (audio.volume !== undefined) {
-      setMasterVolume(Math.round(audio.volume * 100));
-    }
-    if (audio.latency !== undefined) {
-      setLatency(audio.latency);
-    }
-    if (audio.sfx_volume !== undefined) {
-      setSfxVolume(audio.sfx_volume);
-    }
-    if (audio.music_volume !== undefined) {
-      setMusicVolume(audio.music_volume);
-    }
-    if (audio.buffering_enabled !== undefined) {
-      setEnableBuffering(audio.buffering_enabled);
-    }
-  }, [audio.volume, audio.latency, audio.sfx_volume, audio.music_volume, audio.buffering_enabled]);
+    const read = () => {
+      const service = getAudioService();
+      setReady(service.isReady());
+      setStats(service.isReady() ? service.getStats() : null);
+    };
+    read();
+    // The worklet reports upstream about once a second; polling at the same
+    // cadence keeps the readout live without doing pointless work.
+    const timer = window.setInterval(read, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  const handleMasterVolumeChange = async (value: number) => {
-    setMasterVolume(value);
-    const normalizedVolume = value / 100;
+  if (!ready || !stats) {
+    return (
+      <SettingNote title="No audio device active">
+        The pipeline starts with the first game. Load one and come back to see
+        buffer fill, underruns and the rate-control correction live.
+      </SettingNote>
+    );
+  }
 
-    // Apply live so the running game's audio updates immediately, instead
-    // of waiting for the settings save round-trip through Tauri.
-    getAudioService().setVolume(value);
-
-    await saveSettings({
-      ...settings,
-      audio: {
-        ...audio,
-        volume: normalizedVolume,
-      },
-    });
-  };
-
-  const handleSfxVolumeChange = async (value: number) => {
-    setSfxVolume(value);
-    await saveSettings({
-      ...settings,
-      audio: {
-        ...audio,
-        sfx_volume: value,
-      },
-    });
-  };
-
-  const handleMusicVolumeChange = async (value: number) => {
-    setMusicVolume(value);
-    await saveSettings({
-      ...settings,
-      audio: {
-        ...audio,
-        music_volume: value,
-      },
-    });
-  };
-
-  const handleLatencyChange = async (value: number) => {
-    setLatency(value);
-
-    // Apply live so the audio service reconfigures its buffer immediately.
-    getAudioService().setLatency(value);
-
-    await saveSettings({
-      ...settings,
-      audio: {
-        ...audio,
-        latency: value,
-      },
-    });
-  };
-
-  const handleToggleAudio = async (enabled: boolean) => {
-    // Apply live: muting/unmuting should take effect on the currently
-    // playing game immediately, not just on the next settings load.
-    getAudioService().setMuted(!enabled);
-
-    await saveSettings({
-      ...settings,
-      audio: {
-        ...audio,
-        enabled,
-      },
-    });
-  };
-
-  const handleToggleBuffering = async (enabled: boolean) => {
-    setEnableBuffering(enabled);
-    await saveSettings({
-      ...settings,
-      audio: {
-        ...audio,
-        buffering_enabled: enabled,
-      },
-    });
-  };
-
-  const containerClass = theme === 'light'
-    ? 'bg-white'
-    : 'bg-slate-800';
+  const rows: Array<[string, string]> = [
+    ['Buffer fill', `${stats.fillMs.toFixed(1)} ms`],
+    ['Underruns', String(stats.underrunEvents)],
+    ['Dropped frames', String(stats.droppedFrames)],
+    // 1.0 means the resampler is not correcting; the worklet nudges this by
+    // fractions of a percent to hold the buffer at target without audible
+    // pitch drift.
+    ['Rate correction', `${((stats.drcRatio - 1) * 100).toFixed(3)} %`],
+    ['Device latency', `${(stats.baseLatencyMs + stats.outputLatencyMs).toFixed(1)} ms`],
+  ];
 
   return (
-    <div className="space-y-6">
-      {/* Main Audio Toggle */}
-      <section className={`rounded-lg p-6 ${containerClass}`}>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Audio Output</h2>
+    <div className="mt-3 overflow-hidden rounded-md border border-line">
+      {stats.priming && (
+        <p className="border-b border-line bg-warn-soft px-3 py-2 text-[0.8125rem] text-warn-text">
+          Priming — filling the buffer to target before output starts.
+        </p>
+      )}
+      <dl className="divide-y divide-line">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between px-3 py-2">
+            <dt className="text-[0.8125rem] text-mute">{label}</dt>
+            <dd className="register text-ink">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+export function AudioSettings() {
+  const { settings, updateSection } = useSettingsStore();
+  const audio = settings.audio;
+
+  // Volume and buffer target are held locally while dragging so the slider
+  // tracks the pointer at full rate; each change is also applied to the live
+  // audio service immediately, and persisted (the store serialises saves, so a
+  // drag cannot interleave writes out of order).
+  const [volume, setVolume] = useState(Math.round((audio.volume ?? 1) * 100));
+  const [latency, setLatency] = useState(audio.latency ?? 60);
+
+  useEffect(() => {
+    setVolume(Math.round((audio.volume ?? 1) * 100));
+    setLatency(audio.latency ?? 60);
+  }, [audio.volume, audio.latency]);
+
+  const patchAudio = (patch: Partial<typeof audio>) => updateSection('audio', patch);
+
+  const handleVolume = (value: number) => {
+    setVolume(value);
+    getAudioService().setVolume(value);
+    void patchAudio({ volume: value / 100 });
+  };
+
+  const handleLatency = (value: number) => {
+    setLatency(value);
+    getAudioService().setLatency(value);
+    void patchAudio({ latency: value });
+  };
+
+  const handleEnabled = (enabled: boolean) => {
+    getAudioService().setMuted(!enabled);
+    void patchAudio({ enabled });
+  };
+
+  return (
+    <div className="space-y-4">
+      <SettingsSection
+        eyebrow="S-DSP OUTPUT"
+        title="Sound"
+        action={
           <Toggle
             checked={audio.enabled}
-            onChange={(e) => handleToggleAudio(e.target.checked)}
-            label="Enabled"
+            onChange={(e) => handleEnabled(e.target.checked)}
+            aria-label="Enable audio"
           />
-        </div>
-      </section>
-
-      {/* Volume Settings */}
-      <section className={`rounded-lg p-6 ${containerClass}`}>
-        <h2 className="text-lg font-semibold mb-4">Volume</h2>
-        
-        <div className="space-y-6">
-          {/* Master Volume */}
+        }
+        description="The DSP's mixed stereo output, resampled to your device's rate."
+      >
+        <SettingBlock>
           <Slider
-            label="Master Volume"
-            value={masterVolume}
+            label="Volume"
             min={0}
             max={100}
             step={1}
-            showValue
+            value={volume}
             valueDisplay={(v) => `${v}%`}
-            onChange={(e) => handleMasterVolumeChange(parseInt(e.target.value, 10))}
+            onChange={(e) => handleVolume(parseInt(e.target.value, 10))}
             disabled={!audio.enabled}
           />
+        </SettingBlock>
 
-          {/* SFX Volume */}
+        <SettingNote title="Why there is no separate music and effects volume">
+          The S-DSP mixes all eight voices into one stereo pair inside the
+          emulated console, exactly as the hardware does. By the time audio
+          reaches this app, a jump sound and the background music are the same
+          two channels — there is nothing left to balance. This screen used to
+          show “SFX volume” and “Music volume” sliders; they saved a number and
+          changed nothing, so they are gone.
+        </SettingNote>
+      </SettingsSection>
+
+      <SettingsSection
+        eyebrow="RESAMPLER"
+        title="Buffering"
+        description="How much audio is kept queued ahead of the device."
+      >
+        <SettingBlock>
           <Slider
-            label="SFX Volume"
-            value={sfxVolume}
-            min={0}
-            max={100}
-            step={1}
-            showValue
-            valueDisplay={(v) => `${v}%`}
-            onChange={(e) => handleSfxVolumeChange(parseInt(e.target.value, 10))}
+            label="Buffer target"
+            min={LATENCY_MIN}
+            max={LATENCY_MAX}
+            step={5}
+            value={latency}
+            showMinMax
+            valueDisplay={(v) => `${v} ms`}
+            onChange={(e) => handleLatency(parseInt(e.target.value, 10))}
             disabled={!audio.enabled}
-            helperText="Sound effects volume relative to master"
+            helperText={latencyVerdict(latency)}
           />
+        </SettingBlock>
 
-          {/* Music Volume */}
-          <Slider
-            label="Music Volume"
-            value={musicVolume}
-            min={0}
-            max={100}
-            step={1}
-            showValue
-            valueDisplay={(v) => `${v}%`}
-            onChange={(e) => handleMusicVolumeChange(parseInt(e.target.value, 10))}
-            disabled={!audio.enabled}
-            helperText="Background music volume relative to master"
-          />
-        </div>
-      </section>
+        <SettingNote title="What this actually controls">
+          The audio worklet holds a ring of decoded samples and continuously
+          nudges its resampling ratio — by fractions of a percent, below the
+          threshold of audible pitch change — to keep the ring at this target. A
+          larger target survives host stutter at the cost of input-to-sound
+          delay. This was previously a dropdown of five fixed values that did not
+          include the default of 60 ms, so it opened showing nothing selected.
+        </SettingNote>
+      </SettingsSection>
 
-      {/* Latency Settings */}
-      <section className={`rounded-lg p-6 ${containerClass}`}>
-        <h2 className="text-lg font-semibold mb-4">Latency & Performance</h2>
-        
-        <div className="space-y-4">
-          <Select
-            label="Audio Latency"
-            value={String(latency)}
-            options={LATENCY_OPTIONS}
-            onChange={(e) => handleLatencyChange(parseInt(e.target.value, 10))}
-            helperText="Lower latency reduces audio delay but may cause audio glitches"
-            disabled={!audio.enabled}
-          />
-
-          <Toggle
-            checked={enableBuffering}
-            onChange={(e) => handleToggleBuffering(e.target.checked)}
-            label="Enable Audio Buffering"
-            description="Use buffered audio output for smoother playback"
-            disabled={!audio.enabled}
-          />
-        </div>
-      </section>
-
-      {/* Audio Information */}
-      <section className={`rounded-lg p-6 ${containerClass}`}>
-        <h2 className="text-lg font-semibold mb-4">Audio Information</h2>
-        
-        <div className={`p-3 rounded-lg text-sm ${
-          theme === 'light' ? 'bg-gray-100 text-gray-600' : 'bg-slate-700 text-slate-400'
-        }`}>
-          <div className="flex items-center gap-2 mb-2">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="font-medium">SNES Audio</span>
-          </div>
-          <p>SNES audio output is 8-bit PCM at 32kHz. The emulator upscales to higher sample rates for better quality on modern audio hardware.</p>
-        </div>
-      </section>
+      <SettingsSection
+        eyebrow="DIAGNOSTICS"
+        title="Live pipeline"
+        description="Read this while a game runs to tell host stutter apart from a buffer set too low."
+      >
+        <SettingRow label="Source rate" help="The DSP's native output rate; never resampled inside the core.">
+          <span className="register text-ink">32 000 Hz</span>
+        </SettingRow>
+        <AudioTelemetry />
+      </SettingsSection>
     </div>
   );
 }

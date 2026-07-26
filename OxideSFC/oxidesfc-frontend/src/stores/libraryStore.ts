@@ -13,7 +13,14 @@ export interface Game {
   play_count: number;
   last_played: string | null;
   favorite: boolean;
+  /** An image the user pointed at directly, wherever it lives. */
   custom_cover_path: string | null;
+  /**
+   * File name of this game's cover inside the app's covers directory. A bare
+   * name, not a path -- join it with `getCoversDir()` (see domain/coverArt.ts),
+   * which is also what makes it renderable through the asset protocol.
+   */
+  cover_file: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -24,25 +31,42 @@ export interface ScanResult {
   errors: string[];
 }
 
+/** Columns the library can be ordered by. */
+export type LibrarySortKey = 'title' | 'last_played' | 'play_count' | 'favorite';
+
 interface LibraryState {
   games: Game[];
   isLoading: boolean;
   isScanning: boolean;
   searchQuery: string;
-  sortBy: 'title' | 'last_played' | 'play_count' | 'favorite';
+  sortBy: LibrarySortKey;
   sortOrder: 'asc' | 'desc';
   viewMode: 'grid' | 'list';
-  
+
   // Actions
   loadGames: () => Promise<void>;
   scanDirectory: (path: string, recursive?: boolean) => Promise<ScanResult>;
   removeGame: (gameId: string) => Promise<void>;
   toggleFavorite: (gameId: string) => Promise<boolean>;
   setSearchQuery: (query: string) => void;
-  setSortBy: (sortBy: 'title' | 'last_played' | 'play_count' | 'favorite') => void;
+  setSortBy: (sortBy: LibrarySortKey) => void;
   setSortOrder: (order: 'asc' | 'desc') => void;
   setViewMode: (mode: 'grid' | 'list') => void;
+  /**
+   * Click-a-column-header sorting: selecting the active column flips the
+   * direction, selecting a different one switches to it in its natural default
+   * (A-Z for titles, most-recent/most-played first for the numeric columns --
+   * nobody wants "least played" as a first click).
+   */
+  toggleSort: (sortBy: LibrarySortKey) => void;
 }
+
+const NATURAL_ORDER: Record<LibrarySortKey, 'asc' | 'desc'> = {
+  title: 'asc',
+  last_played: 'desc',
+  play_count: 'desc',
+  favorite: 'desc',
+};
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   games: [],
@@ -64,13 +88,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }
   },
 
-  scanDirectory: async (path: string, _recursive = true) => {
+  scanDirectory: async (path: string, recursive = true) => {
     set({ isScanning: true });
     try {
       // `scan_directory` only scans and returns results in memory -- it never
       // writes to library.json. `add_game_folder` does the same scan and then
       // persists (deduping by file_path), which is what the reload below needs.
-      const result = await invoke<ScanResult>('add_game_folder', { path });
+      //
+      // `recursive` is forwarded rather than ignored: the parameter was
+      // previously named `_recursive` and dropped on the floor, so callers
+      // passing the user's "include subfolders" preference had no effect.
+      const result = await invoke<ScanResult>('add_game_folder', { path, recursive });
 
       // Reload games after scanning
       await get().loadGames();
@@ -110,7 +138,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   setSearchQuery: (query: string) => set({ searchQuery: query }),
-  setSortBy: (sortBy: 'title' | 'last_played' | 'play_count' | 'favorite') => set({ sortBy }),
+  setSortBy: (sortBy: LibrarySortKey) => set({ sortBy }),
   setSortOrder: (order: 'asc' | 'desc') => set({ sortOrder: order }),
   setViewMode: (mode: 'grid' | 'list') => set({ viewMode: mode }),
+
+  toggleSort: (sortBy: LibrarySortKey) => {
+    const state = get();
+    if (state.sortBy === sortBy) {
+      set({ sortOrder: state.sortOrder === 'asc' ? 'desc' : 'asc' });
+    } else {
+      set({ sortBy, sortOrder: NATURAL_ORDER[sortBy] });
+    }
+  },
 }));

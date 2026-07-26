@@ -75,9 +75,47 @@ The React side under `src/` follows a layered structure (loosely matching `plans
 - `stores/` — Zustand stores (`emulationStore.ts`, `libraryStore.ts`, `settingsStore.ts`); these call `invoke()` from `@tauri-apps/api/core` directly to reach Tauri commands. `emulationStore.ts` is the only emulation-wiring path — an earlier parallel `EmulationService`/`TauriEmulationCore`/`useEmulationLoop` stack under `infrastructure/emulation/` and `hooks/` was dead code with no callers and has been removed.
 - `infrastructure/` — adapters to the outside world: `filesystem/`, `network/` (IGDB and Screenscraper metadata clients), `input/`.
 - `services/` — cross-cutting logic not tied to a single store: audio playback, WebGL rendering (`renderer/WebGLRenderer.ts`, `ShaderService.ts`), hotkeys, controller profiles, an event bus.
-- `domain/types.ts` — shared TS types for games/ROMs independent of any particular store or service.
+- `domain/` — logic and types independent of any store, service or component: `types.ts` (shared game/ROM types), `keyboardDefaults.ts` and `keyLabel.ts` (the key-code ↔ SNES-button vocabulary), `romFormat.ts` (how header values are rendered — sizes in **Mbit**, not MB), `cartTone.ts` (the library card's colour hash).
+- `shell/` — the app frame: `NavRail.tsx`, the 60px icon rail `App.tsx` renders beside the active view.
 
 When adding a feature that touches both Rust and TS, the typical chain is: Tauri command (`src-tauri/src/commands/*.rs`) → registered in `src-tauri/src/lib.rs` → called via `invoke()` in an `infrastructure/` adapter or directly in a `stores/*.ts` store → consumed by a component in `components/`.
+
+### Styling: tokens, not theme branches
+
+**No component may branch on the active theme in JavaScript.** All colour resolves through CSS custom properties declared in `src/styles/tokens.css` and keyed off two attributes on `<html>`:
+
+- `data-theme="dark" | "light"` — surfaces and text. Dark is a warm charcoal (the shadow inside a cartridge slot); light is the Super Famicom's own warm-grey shell.
+- `data-accent="red" | "yellow" | "green" | "blue"` — the interactive hue, named after the face button it borrows. Both themes define all four ramps, so all eight combinations work.
+
+`src/theme.ts` owns `applyAppearance()`; `stores/settingsStore.ts` calls it on every load/save so appearance can never lag the persisted value. `tailwind.config.js` maps the tokens to utility names (`bg-panel`, `text-ink`, `text-dim`, `border-line`, `bg-accent-soft`, …) — there is deliberately **no** `dark:` variant, since that would be a second competing mechanism. `src/styles/index.css` holds the component primitives (`.panel`, `.btn`, `.field`, `.seg`, `.switch`, `.range`, `.cart`, `.rom-table`, `.rail`, plus the play deck's `.control-deck`/`.deck-*`).
+
+Three typographic roles carry meaning and must not be used decoratively:
+
+- **`.register`** — monospace microtext with tabular figures, for *recorded factual values*: both what the machine reports (`256×224`, `60 Hz`, `LoROM`, `8 Mbit`, `$2100`) and what the app has measured (playtime, session counts, buffer fill, timestamps). Never for prose, and never to label a control. The tell for whether a use belongs is the tabular figures: if the content isn't a value worth aligning digit-for-digit, it isn't a register.
+- **`.eyebrow`** — heads a **section**. Where the section governs hardware, name it for that hardware (`PPU / OUTPUT`, `S-DSP / APU`, `JOYPAD 1-2`), because that is the most useful thing to call it — but that is guidance on wording, not a condition on the class. Sections with no silicon behind them (`Continue`, `Collections`, `Views`, `History`, `Maintenance`) are still sections and still use `.eyebrow`.
+- **`.microlabel`** — the same visual treatment as `.eyebrow` (mono micro caps, tracked wide) for captions and data labels, e.g. the `<dt>`s in the library's stat lists. It exists so `.eyebrow` keeps meaning "section heading": the two were conflated at first, and reusing `.eyebrow` as a data label erodes the one thing its name promises.
+- **`.hint`** — small muted **sans** text for status lines ("loading collections…", "none detected") and inline instructions ("Esc or click outside to close"). Reach for this, never `.register`, when the content is a sentence. Its absence is what made `.register` rot in the first place: with no primitive for quiet prose, the monospace value voice absorbed eleven such sites.
+
+The line to hold is section-heading vs data-label. Do not subdivide section headings further by whether they name hardware — the styling is identical, so a third class would be a distinction without a difference, and it would push section headings back onto the data-label class.
+
+No webfont is bundled or fetched; the stacks resolve to Segoe UI Variable / Cascadia Mono on Windows.
+
+### Settings screen
+
+`components/settings/Settings.tsx` is only a shell: a panel list, a jump-to search index, and a scroll container. Every control lives in the panel that owns it (`VideoSettings`, `AudioSettings`, `ControllerSettings`, `LibrarySettings`, `GeneralSettings`), all built from the shared `SettingsSection`/`SettingRow`/`SettingNote` chrome. Adding a setting means editing one panel plus a row in `settingsIndex.ts` (whose `keywords` deliberately carry synonyms that do *not* appear in the visible label — that is the point of the field). `panels.ts` exists separately from the index so the index can name panel ids without importing React components.
+
+Option lists in these panels must match what the code actually implements. `scale_mode` drives both texture filtering and the xBRZ/HQ2x shader selection in `WebGLRenderer.resolveShaderType()`; `shader` only drives its `crtMode` flag. Offering a value the renderer has no branch for silently does nothing.
+
+### Cover art
+
+`src-tauri/src/commands/covers.rs` resolves box art in two tiers, both matched on the ROM's **file name**: images already sitting beside the ROM (or in a `covers/`, `media/`, `boxart/` sibling folder), then the Libretro thumbnail CDN. Libretro is the online default specifically because it needs no credentials — ScreenScraper issues per-application developer IDs and IGDB requires a Twitch client *secret*, neither of which can ship in an open-source desktop binary. `infrastructure/network/{IGDBClient,ScreenscraperClient}.ts` remain unused, awaiting a user-credentialed tier that would match on ROM CRC32 instead of name.
+
+Two details that are easy to get wrong:
+
+- **Rendering needs the asset protocol.** A raw filesystem path in `<img src>` will not load in the webview. `tauri.conf.json` enables `assetProtocol` with its scope deliberately narrowed to `$DATA/OxideSFC/covers/*`, and `domain/coverArt.ts`'s `coverSrc()` runs paths through `convertFileSrc()`. Widening that scope would hand the webview read access to arbitrary files. Note `$DATA/OxideSFC` — not `$APPDATA`, which Tauri resolves to `Roaming/<identifier>` and would not match where the Rust side actually writes.
+- **Names, not hashes.** Libretro is keyed on No-Intro release names, which real ROM files usually already are. `name_candidates()` tries the literal name first (so a correct set costs one request per game), then a GoodSNES reading — `[...]` dump flags stripped, `(U)` → `(USA)` — which is what lets `Super Mario World (U) [!].smc` find `Super Mario World (USA).png`. A renamed dump legitimately misses; misses are recorded as `<key>.miss` markers so they cost one request ever rather than one per launch. A failure to *reach* the CDN is never recorded as a miss.
+
+Concurrency lives in `fetchCovers()` on the TypeScript side rather than in Rust: cancelling is then just "stop queueing", progress is exact without an event channel, and each `fetch_cover` call stays an independent, retryable unit.
 
 ### Input handling
 

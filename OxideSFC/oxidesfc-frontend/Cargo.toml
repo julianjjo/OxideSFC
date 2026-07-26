@@ -23,7 +23,7 @@ tauri-build = { version = "2", features = [] }
 oxidesfc-core = { path = "../oxidesfc-core" }
 
 # Tauri
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = ["protocol-asset", "devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -56,6 +56,13 @@ gilrs = "0.11"
 
 # Hashing
 crc32fast = "1"
+
+# Cover-art downloads. `ureq` rather than `reqwest`: it is blocking (which suits
+# a plain `#[tauri::command]`, dispatched on Tauri's own thread pool, and avoids
+# occupying an async executor thread with network I/O), pure-Rust TLS via rustls
+# so there is no OpenSSL to link, and a small fraction of reqwest's dependency
+# footprint -- which matters for a release profile tuned with `opt-level = "s"`.
+ureq = "2"
 
 # Date/time
 chrono = "0.4"

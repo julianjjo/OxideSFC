@@ -1,7 +1,21 @@
-use crate::emulation::{GameInfo, InputState, VideoFrame};
+use crate::emulation::{EmulationController, GameInfo, InputState, SaveSlotInfo, VideoFrame};
 use crate::AppState;
 use tauri::State;
 use tracing::{debug, info};
+
+/// Number of save-state slots the UI offers.
+const SAVE_SLOT_COUNT: u8 = 10;
+
+/// Occupancy of every save-state slot.
+///
+/// Reads the saves directory directly rather than going through the emulation
+/// mutex: it touches no `Snes` state, and the pickers that call it open while a
+/// frame loop is holding that lock several times a second.
+#[tauri::command]
+pub fn list_save_states() -> Result<Vec<SaveSlotInfo>, String> {
+    debug!("Listing save-state slots");
+    Ok(EmulationController::list_save_states(SAVE_SLOT_COUNT))
+}
 
 #[tauri::command]
 pub fn load_rom(path: String, state: State<AppState>) -> Result<GameInfo, String> {

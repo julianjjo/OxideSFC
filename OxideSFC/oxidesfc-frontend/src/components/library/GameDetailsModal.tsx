@@ -1,17 +1,24 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '../common/Button';
-import { Modal } from '../common/Modal';
-import { Toggle } from '../common/Toggle';
-import { useLibraryStore } from '../../stores/libraryStore';
+import { Modal, ConfirmModal } from '../common/Modal';
+import { IconPlaySolid, IconStar, IconTrash } from '../common/icons';
 import type { Game } from '../../stores/libraryStore';
+import { cartToneClass } from '../../domain/cartTone';
+import {
+  displayTitle,
+  formatDateTime,
+  formatPlayTime,
+  formatRomSize,
+  formatSramSize,
+  regionTag,
+} from '../../domain/romFormat';
+import { coverSrc } from '../../domain/coverArt';
+import { CollectionPicker } from './CollectionPicker';
 
-// Re-exported so existing `import { Game } from './GameDetailsModal'` /
-// `from './index'` call sites keep working. The real shape lives in
-// libraryStore.ts, matching what the `get_games`/`scan_directory` Tauri
-// commands actually return -- there is no separate crc32/region/developer/
-// etc. metadata on the backend today (see GameMetadata in domain/types.ts
-// for the *external* metadata shape, which is a different concept).
+// Re-exported so existing `import { Game } from './GameDetailsModal'` call sites
+// keep working. The real shape lives in libraryStore.ts, matching what the
+// `get_games` command actually returns.
 export type { Game };
 
 interface GameDetailsModalProps {
@@ -19,12 +26,11 @@ interface GameDetailsModalProps {
   onClose: () => void;
   game: Game | null;
   onPlay: (game: Game) => void;
-  onEdit: (game: Game) => void;
+  onToggleFavorite: (game: Game) => void;
   onDelete: (game: Game) => void;
-  onManageSaves: (game: Game) => void;
-  // Matches the loosely-typed `theme: string` used by GameGrid/GameCard/
-  // Library (settings.general.theme is a plain string, not a literal union).
-  theme?: string;
+  coversDir?: string | null;
+  /** Called when collection membership changes, so counts can refresh. */
+  onCollectionsChange?: () => void;
 }
 
 export function GameDetailsModal({
@@ -32,207 +38,193 @@ export function GameDetailsModal({
   onClose,
   game,
   onPlay,
-  onEdit,
+  onToggleFavorite,
   onDelete,
-  onManageSaves,
-  theme = 'dark',
+  coversDir = null,
+  onCollectionsChange,
 }: GameDetailsModalProps) {
-  const { toggleFavorite } = useLibraryStore();
-  const [isFavorite, setIsFavorite] = useState(game?.favorite || false);
-  const [playTime, setPlayTime] = useState<number | null>(null);
-  // Tracks which game id the most recent async play-time/cover requests
-  // were issued for, so a resolving request from a game the user has since
-  // navigated away from (rapid switching between games in the grid) is
-  // discarded instead of overwriting state for the *currently* displayed
-  // game.
-  const requestedGameIdRef = useRef<string | null>(null);
+  const [playSeconds, setPlaySeconds] = useState<number | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [artBroken, setArtBroken] = useState(false);
+
+  // Tracks which game the in-flight play-time request belongs to, so a response
+  // for a game the user has since navigated away from is discarded instead of
+  // overwriting the current one.
+  const requestedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (game) {
-      setIsFavorite(game.favorite);
-      requestedGameIdRef.current = game.id;
-      loadPlayTime(game.id);
-    } else {
-      setPlayTime(null);
+    // Give a new game's art a fresh chance to load. This has to live here rather
+    // than beside the `art` computation below, which sits after an early return --
+    // a hook there would be called conditionally.
+    setArtBroken(false);
+
+    if (!game) {
+      setPlaySeconds(null);
+      return;
     }
+    requestedIdRef.current = game.id;
+    invoke<number>('get_game_play_time', { gameId: game.id })
+      .then((seconds) => {
+        if (requestedIdRef.current === game.id) setPlaySeconds(seconds);
+      })
+      .catch((error) => {
+        console.error('Failed to load play time:', error);
+        if (requestedIdRef.current === game.id) setPlaySeconds(null);
+      });
   }, [game]);
-
-  const loadPlayTime = async (gameId: string) => {
-    try {
-      const time = await invoke<number>('get_game_play_time', { gameId });
-      if (requestedGameIdRef.current !== gameId) return; // stale: game changed since this request was issued
-      setPlayTime(time);
-    } catch (error) {
-      console.error('Failed to load play time:', error);
-      if (requestedGameIdRef.current !== gameId) return;
-      setPlayTime(null);
-    }
-  };
-
-  const handleToggleFavorite = async () => {
-    if (!game) return;
-    try {
-      // Route through libraryStore rather than calling invoke() directly so
-      // the grid's sort-by-favorite reflects the change immediately, and
-      // rely on the store's fresh return value (not a value captured in
-      // this closure) so rapid double-toggles can't cancel each other out.
-      const newValue = await toggleFavorite(game.id);
-      setIsFavorite(newValue);
-    } catch (error) {
-      console.error('Failed to toggle favorite:', error);
-    }
-  };
-
-  const formatFileSize = (bytes: number): string => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
-
-  // `get_game_play_time` returns `total_play_seconds` (see
-  // src-tauri/src/commands/library.rs's `Game.total_play_seconds`), not
-  // minutes -- format from seconds into a human-readable duration.
-  const formatPlayTime = (seconds: number | null): string => {
-    if (seconds === null || seconds === 0) return 'No play time recorded';
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    if (hours > 0) {
-      return `${hours}h ${mins}m`;
-    }
-    if (mins > 0) {
-      return `${mins}m`;
-    }
-    return `${seconds}s`;
-  };
-
-  const formatDate = (dateString: string | null): string => {
-    if (!dateString) return 'Never';
-    const date = new Date(dateString);
-    return date.toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
 
   if (!game) return null;
 
+  const title = displayTitle(game.title);
+  const sram = formatSramSize(game.sram_size);
+  const art = coverSrc(game, coversDir);
+
+  const cartridge: Array<[string, string]> = [
+    ['Region', `${game.country || 'Unknown'} · ${regionTag(game.country)}`],
+    ['ROM size', formatRomSize(game.file_size)],
+    ['Mapper', game.rom_type || 'Unknown'],
+    // A cart either has battery-backed save memory or it does not; "0 Kbit" is
+    // less informative than saying so.
+    ['Save memory', sram ? `${sram} SRAM` : 'None (no battery save)'],
+  ];
+
+  const history: Array<[string, string]> = [
+    ['Time played', formatPlayTime(playSeconds)],
+    ['Sessions', String(game.play_count || 0)],
+    ['Last played', formatDateTime(game.last_played)],
+    ['Added', formatDateTime(game.created_at)],
+  ];
+
   return (
-    <Modal
-      isOpen={isOpen}
-      onClose={onClose}
-      title={game.title}
-      size="lg"
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            Close
-          </Button>
-        </>
-      }
-    >
-      <div className="flex flex-col md:flex-row gap-6">
-        {/* Cover Image / Screenshots */}
-        <div className="w-full md:w-1/3">
-          <div className={`aspect-square rounded-lg overflow-hidden ${
-            theme === 'light' ? 'bg-gray-200' : 'bg-slate-700'
-          }`}>
-            {/* No metadata-scraping backend exists yet to fetch cover art
-                (get_game_cover has no matching Tauri command -- calling it
-                would always reject). Only show a real image when the game
-                has a locally-set custom_cover_path; otherwise fall back to
-                the same static placeholder GameCard.tsx uses elsewhere in
-                the library, for visual consistency. */}
-            {game.custom_cover_path ? (
-              <img
-                src={game.custom_cover_path}
-                alt={`${game.title} cover`}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center">
-                <span className="text-6xl">🎮</span>
+    <>
+      <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title={title}
+        subtitle={game.file_name}
+        size="lg"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={<IconTrash size={14} />}
+              onClick={() => setConfirmDelete(true)}
+              className="mr-auto"
+            >
+              Remove from library
+            </Button>
+            <Button variant="secondary" onClick={onClose}>
+              Close
+            </Button>
+            <Button leftIcon={<IconPlaySolid size={14} />} onClick={() => onPlay(game)}>
+              Play
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-5 sm:flex-row">
+          <div className="w-full flex-none sm:w-56">
+            <div
+              className={`cart ${cartToneClass(game.title)} pointer-events-none`}
+            >
+              <div className={`cart-label${art && !artBroken ? ' cart-label--art' : ''}`}>
+                {art && !artBroken ? (
+                  <img
+                    src={art}
+                    alt=""
+                    className="cart-art"
+                    onError={() => setArtBroken(true)}
+                  />
+                ) : (
+                  <h3 className="cart-title">{title}</h3>
+                )}
               </div>
-            )}
+              <div className="cart-foot">
+                <span className="register truncate">
+                  {regionTag(game.country)} · {formatRomSize(game.file_size)}
+                </span>
+              </div>
+            </div>
+
+            <Button
+              variant={game.favorite ? 'primary' : 'secondary'}
+              size="sm"
+              block
+              className="mt-2.5"
+              leftIcon={<IconStar size={14} filled={game.favorite} />}
+              onClick={() => onToggleFavorite(game)}
+            >
+              {game.favorite ? 'Favourited' : 'Add to favourites'}
+            </Button>
           </div>
-          
-          {/* Favorite Toggle */}
-          <div className="mt-4 flex items-center justify-center">
-            <Toggle
-              checked={isFavorite}
-              onChange={handleToggleFavorite}
-              label={isFavorite ? '★ Favorited' : '☆ Add to Favorites'}
-            />
+
+          <div className="min-w-0 flex-1 space-y-4">
+            <section>
+              <p className="eyebrow mb-1.5">Cartridge</p>
+              <dl className="overflow-hidden rounded-md border border-line">
+                {cartridge.map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="flex items-center justify-between gap-4 border-b border-line px-3 py-2 last:border-b-0"
+                  >
+                    <dt className="text-[0.8125rem] text-mute">{label}</dt>
+                    <dd className="register text-right text-ink">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+
+            <section>
+              <p className="eyebrow mb-1.5">History</p>
+              <dl className="overflow-hidden rounded-md border border-line">
+                {history.map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="flex items-center justify-between gap-4 border-b border-line px-3 py-2 last:border-b-0"
+                  >
+                    <dt className="text-[0.8125rem] text-mute">{label}</dt>
+                    <dd className="register text-right text-ink">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+
+            <section>
+              <p className="eyebrow mb-1.5">Collections</p>
+              <CollectionPicker gameId={game.id} onChange={onCollectionsChange} />
+            </section>
+
+            <section>
+              <p className="eyebrow mb-1.5">File</p>
+              <code className="block break-all rounded-md border border-line bg-raised px-3 py-2 font-mono text-[0.75rem] text-dim">
+                {game.file_path}
+              </code>
+            </section>
           </div>
         </div>
 
-        {/* Game Details */}
-        <div className="flex-1 space-y-4">
-          {/* Basic Info */}
-          <div className={`rounded-lg p-4 ${theme === 'light' ? 'bg-gray-100' : 'bg-slate-700'}`}>
-            <h3 className="font-semibold mb-3">Game Information</h3>
-            <dl className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>System</dt>
-                <dd>SNES</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>Region</dt>
-                <dd className="capitalize">{game.country || 'Unknown'}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>File Size</dt>
-                <dd>{formatFileSize(game.file_size)}</dd>
-              </div>
-              {game.sram_size > 0 && (
-                <div className="flex justify-between">
-                  <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>SRAM Size</dt>
-                  <dd>{formatFileSize(game.sram_size)}</dd>
-                </div>
-              )}
-            </dl>
-          </div>
+        {/*
+          There used to be "Edit" and "Manage saves" buttons here. Neither had an
+          implementation behind it -- both handlers logged a "not yet
+          implemented" warning and returned -- so they are gone rather than
+          restyled. Save states are reachable from the in-game quick menu, which
+          is where they actually work.
+        */}
+      </Modal>
 
-          {/* Play Stats */}
-          <div className={`rounded-lg p-4 ${theme === 'light' ? 'bg-gray-100' : 'bg-slate-700'}`}>
-            <h3 className="font-semibold mb-3">Play Statistics</h3>
-            <dl className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>Play Time</dt>
-                <dd>{formatPlayTime(playTime)}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>Play Count</dt>
-                <dd>{game.play_count} times</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className={theme === 'light' ? 'text-gray-600' : 'text-slate-400'}>Last Played</dt>
-                <dd>{formatDate(game.last_played)}</dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* Actions */}
-          <div className="flex flex-wrap gap-2 pt-2">
-            <Button variant="primary" onClick={() => onPlay(game)}>
-              ▶ Play
-            </Button>
-            <Button variant="secondary" onClick={() => onEdit(game)}>
-              ✎ Edit
-            </Button>
-            <Button variant="secondary" onClick={() => onManageSaves(game)}>
-              💾 Manage Saves
-            </Button>
-            <Button variant="danger" onClick={() => onDelete(game)}>
-              🗑 Delete
-            </Button>
-          </div>
-        </div>
-      </div>
-    </Modal>
+      <ConfirmModal
+        isOpen={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={() => {
+          setConfirmDelete(false);
+          onDelete(game);
+        }}
+        title={`Remove “${title}”?`}
+        message="The entry leaves your library along with its play history. The ROM file on disk is not deleted, and a rescan will find it again."
+        confirmText="Remove entry"
+        variant="danger"
+      />
+    </>
   );
 }

@@ -1,143 +1,154 @@
 import { useSettingsStore } from '../../stores/settingsStore';
 import { Toggle } from '../common/Toggle';
 import { Select } from '../common/Select';
+import { SettingsSection, SettingRow, SettingNote } from './SettingsSection';
 
-// Renderer options
 const RENDERER_OPTIONS = [
   { value: 'webgl', label: 'WebGL' },
-  { value: 'webgpu', label: 'WebGPU (Coming soon)', disabled: true },
+  { value: 'webgpu', label: 'WebGPU (not implemented)', disabled: true },
 ];
 
-// Shader options
-const SHADER_OPTIONS = [
-  { value: 'none', label: 'None' },
-  { value: 'crt', label: 'CRT Scanlines' },
-  { value: 'crt-curved', label: 'CRT Curved' },
+/**
+ * Upscaling.
+ *
+ * These are exactly the four values `WebGLRenderer` acts on: 'nearest' and
+ * 'bilinear' set the texture filter, 'xbrz' and 'hq2x' additionally select a
+ * shader program (see `resolveShaderType`). The list used to offer 'bicubic'
+ * and 'lanczos', which the renderer has no branch for -- both silently fell
+ * through to bilinear -- while xBRZ and HQ2x, which are fully implemented, were
+ * only listed in the *shader* dropdown where nothing reads them. So the two
+ * working upscalers were unreachable and two non-existent ones were on offer.
+ */
+const SCALE_MODE_OPTIONS = [
+  { value: 'nearest', label: 'Nearest neighbour' },
+  { value: 'bilinear', label: 'Bilinear' },
   { value: 'xbrz', label: 'xBRZ' },
   { value: 'hq2x', label: 'HQ2x' },
-  { value: 'scale2x', label: 'Scale2x' },
 ];
 
-// Scale mode options
-const SCALE_MODE_OPTIONS = [
-  { value: 'nearest', label: 'Nearest Neighbor' },
-  { value: 'bilinear', label: 'Bilinear' },
-  { value: 'bicubic', label: 'Bicubic' },
-  { value: 'lanczos', label: 'Lanczos' },
+/**
+ * Post-processing. `EmulatorView` translates this into the renderer's single
+ * `crtMode` flag, so 'none' and 'crt' are the only values with an effect;
+ * 'crt-curved', 'xbrz', 'hq2x' and 'scale2x' were listed here previously and
+ * did nothing at all.
+ */
+const SHADER_OPTIONS = [
+  { value: 'none', label: 'None' },
+  { value: 'crt', label: 'CRT (scanlines, curvature, vignette)' },
 ];
 
-// Frame limit options
 const FRAME_LIMIT_OPTIONS = [
+  { value: '60', label: '60 fps (console speed)' },
+  { value: '120', label: '120 fps' },
+  { value: '144', label: '144 fps' },
+  { value: '30', label: '30 fps' },
   { value: 'unlimited', label: 'Unlimited' },
-  { value: '60', label: '60 FPS' },
-  { value: '120', label: '120 FPS' },
-  { value: '144', label: '144 FPS' },
-  { value: '30', label: '30 FPS (Slow)' },
 ];
 
 export function VideoSettings() {
-  const { settings, saveSettings } = useSettingsStore();
-  const theme = settings.general.theme;
+  const { settings, updateSection } = useSettingsStore();
   const video = settings.video;
 
-  const handleChange = async (key: string, value: string | boolean | number) => {
-    await saveSettings({
-      ...settings,
-      video: {
-        ...video,
-        [key]: value,
-      },
-    });
-  };
+  const handleChange = (key: string, value: string | boolean | number) =>
+    updateSection('video', { [key]: value });
+
+  const crtActive = video.shader === 'crt';
+  const upscalerShaderActive = video.scale_mode === 'xbrz' || video.scale_mode === 'hq2x';
 
   return (
-    <div className="space-y-6">
-      {/* Renderer Selection */}
-      <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-        <h2 className="text-lg font-semibold mb-4">Renderer</h2>
-        
-        <div className="space-y-4">
+    <div className="space-y-4">
+      <SettingsSection
+        eyebrow="OUTPUT PIPELINE"
+        title="Renderer"
+        description="How the console's 256×224 frame is drawn to the window."
+      >
+        <SettingRow label="Graphics API" help="WebGPU is planned; only the WebGL path exists today.">
           <Select
-            label="Graphics API"
-            value={video.renderer}
             options={RENDERER_OPTIONS}
+            value={video.renderer}
             onChange={(e) => handleChange('renderer', e.target.value)}
-            helperText="WebGPU support is planned but not yet implemented"
+            inputSize="sm"
+            className="w-56"
+            aria-label="Graphics API"
           />
+        </SettingRow>
 
+        <SettingRow
+          label="Scale mode"
+          help="Nearest keeps tile edges hard. Bilinear softens the upscale, which is closer to how a CRT blended the dithering many games use for transparency."
+        >
           <Select
-            label="Scale Mode"
-            value={video.scale_mode}
             options={SCALE_MODE_OPTIONS}
+            value={video.scale_mode}
             onChange={(e) => handleChange('scale_mode', e.target.value)}
-            helperText="Determines how the image is scaled when upscaling"
+            inputSize="sm"
+            className="w-56"
+            aria-label="Scale mode"
           />
-        </div>
-      </section>
+        </SettingRow>
+      </SettingsSection>
 
-      {/* Shader Selection */}
-      <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-        <h2 className="text-lg font-semibold mb-4">Video Filters</h2>
-        
-        <div className="space-y-4">
+      <SettingsSection
+        eyebrow="POST-PROCESSING"
+        title="Video filter"
+        description="Applied after the frame is uploaded, over the whole picture."
+      >
+        <SettingRow label="Shader">
           <Select
-            label="Shader"
-            value={video.shader}
             options={SHADER_OPTIONS}
+            value={video.shader}
             onChange={(e) => handleChange('shader', e.target.value)}
-            helperText="Apply post-processing effects to the output"
+            inputSize="sm"
+            className="w-56"
+            aria-label="Shader"
           />
+        </SettingRow>
 
-          {video.shader !== 'none' && (
-            <div className={`p-3 rounded-lg text-sm ${
-              theme === 'light' ? 'bg-blue-50 text-blue-700' : 'bg-blue-900/30 text-blue-300'
-            }`}>
-              Shader preview will appear in the emulator view when a game is running.
-            </div>
-          )}
-        </div>
-      </section>
+        {crtActive && upscalerShaderActive && (
+          <SettingNote title="CRT is overriding your upscaler" tone="accent">
+            The renderer runs one shader program at a time, and CRT wins. Set the
+            shader back to None to see {video.scale_mode === 'xbrz' ? 'xBRZ' : 'HQ2x'} again.
+          </SettingNote>
+        )}
+      </SettingsSection>
 
-      {/* VSync & Frame Limit */}
-      <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-        <h2 className="text-lg font-semibold mb-4">Performance</h2>
-        
-        <div className="space-y-4">
+      <SettingsSection
+        eyebrow="PACING"
+        title="Frame delivery"
+        description="The core is paced by its own master clock; these settings govern how the window presents it."
+      >
+        <SettingRow
+          label="Vertical sync"
+          help="Match the display's refresh to avoid tearing."
+        >
           <Toggle
             checked={video.vsync}
             onChange={(e) => handleChange('vsync', e.target.checked)}
-            label="Vertical Sync (VSync)"
-            description="Synchronize display refresh rate with frame rate to prevent tearing"
+            aria-label="Vertical sync"
           />
+        </SettingRow>
 
+        <SettingRow
+          label="Frame limit"
+          help="A cap above the console's own rate does not make games run faster; it only affects how often the window redraws."
+        >
           <Select
-            label="Frame Limit"
-            value={video.frame_limit}
             options={FRAME_LIMIT_OPTIONS}
+            value={video.frame_limit}
             onChange={(e) => handleChange('frame_limit', e.target.value)}
-            helperText="Limit the maximum frames per second"
+            inputSize="sm"
+            className="w-56"
+            aria-label="Frame limit"
           />
-        </div>
-      </section>
+        </SettingRow>
 
-      {/* Advanced Settings */}
-      <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-        <h2 className="text-lg font-semibold mb-4">Advanced</h2>
-        
-        <div className="space-y-4">
-          <div className={`p-3 rounded-lg text-sm ${
-            theme === 'light' ? 'bg-gray-100 text-gray-600' : 'bg-slate-700 text-slate-400'
-          }`}>
-            <div className="flex items-center gap-2 mb-2">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span className="font-medium">Resolution Scaling</span>
-            </div>
-            <p>Internal resolution is fixed at 256x224 (SNES native). Output scaling can be adjusted in the emulator view.</p>
-          </div>
-        </div>
-      </section>
+        <SettingNote title="Internal resolution is fixed">
+          The core renders at the console's native 256×224 (512×448 in the hi-res
+          modes a few games use). There is no internal upscaling to configure --
+          everything above happens on the way to the window, so a save state
+          taken at one setting looks correct at any other.
+        </SettingNote>
+      </SettingsSection>
     </div>
   );
 }

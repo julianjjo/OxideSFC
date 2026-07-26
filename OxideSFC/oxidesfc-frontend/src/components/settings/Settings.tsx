@@ -1,242 +1,181 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { Input } from '../common/Input';
+import {
+  IconSearch,
+  IconDisplay,
+  IconAudio,
+  IconGamepad,
+  IconDatabase,
+  IconSliders,
+} from '../common/icons';
+import { VideoSettings } from './VideoSettings';
+import { AudioSettings } from './AudioSettings';
+import { ControllerSettings } from './ControllerSettings';
+import { LibrarySettings } from './LibrarySettings';
+import { GeneralSettings } from './GeneralSettings';
+import { SETTINGS_PANELS, SETTINGS_PANEL_META, type SettingsPanelId } from './panels';
+import { searchSettings } from './settingsIndex';
 
 export interface SettingsProps {
   onRelaunchWizard?: () => void;
 }
 
+const PANEL_ICONS: Record<SettingsPanelId, React.ReactNode> = {
+  video: <IconDisplay />,
+  audio: <IconAudio />,
+  controls: <IconGamepad />,
+  library: <IconDatabase />,
+  general: <IconSliders />,
+};
+
+/**
+ * Settings.
+ *
+ * This screen used to be a single 240-line file with raw checkboxes that
+ * surfaced eight of the app's settings. The other twenty-odd already existed --
+ * fully built, in `VideoSettings`, `AudioSettings`, `ControllerSettings` and
+ * `LibrarySettings`, exported from this directory's index and rendered by
+ * nothing. Key remapping, gamepad testing, ROM folder management and library
+ * maintenance were all unreachable from the UI.
+ *
+ * So this file is now only a shell: a panel list, a search index that jumps to
+ * the panel owning a setting, and a scroll container. Every control lives in the
+ * panel that owns it, which is what makes adding one a one-file change.
+ */
 export function Settings({ onRelaunchWizard }: SettingsProps) {
-  const { settings, loadSettings, saveSettings, isLoading } = useSettingsStore();
+  const { loadSettings, isLoading } = useSettingsStore();
+  const [panel, setPanel] = useState<SettingsPanelId>('video');
+  const [query, setQuery] = useState('');
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
 
-  const handleThemeChange = async (theme: string) => {
-    await saveSettings({
-      ...settings,
-      general: { ...settings.general, theme },
-    });
+  // Each panel keeps its own scroll position conceptually, but the container is
+  // shared -- reset to the top on switch so a new panel never opens mid-way
+  // down.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [panel]);
+
+  const results = useMemo(() => searchSettings(query), [query]);
+  const searching = query.trim().length > 0;
+
+  const jumpTo = (target: SettingsPanelId) => {
+    setPanel(target);
+    setQuery('');
+    searchRef.current?.blur();
   };
 
-  const handleVideoSettingChange = async (key: string, value: unknown) => {
-    await saveSettings({
-      ...settings,
-      video: { ...settings.video, [key]: value },
-    });
-  };
-
-  const handleAudioSettingChange = async (key: string, value: unknown) => {
-    await saveSettings({
-      ...settings,
-      audio: { ...settings.audio, [key]: value },
-    });
-  };
-
-  const handleReplayWizard = async () => {
-    await saveSettings({
-      ...settings,
-      general: { ...settings.general, has_completed_onboarding: false },
-    });
-    onRelaunchWizard?.();
-  };
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-lg">Loading settings...</div>
-      </div>
-    );
-  }
-
-  const theme = settings.general.theme;
+  const meta = SETTINGS_PANEL_META[panel];
 
   return (
-    <div className={`h-full overflow-auto ${theme === 'light' ? 'bg-gray-100' : 'bg-slate-900'}`}>
-      <div className="max-w-2xl mx-auto p-6 space-y-6">
-        <h1 className="text-2xl font-bold mb-6">Settings</h1>
+    <div className="flex h-full min-w-0">
+      {/* Panel list ------------------------------------------------------- */}
+      <div className="flex w-56 flex-none flex-col border-r border-line bg-panel">
+        <div className="px-4 pb-3 pt-5">
+          <h1 className="display-lg text-ink">Settings</h1>
+        </div>
 
-        {/* General Settings */}
-        <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-          <h2 className="text-lg font-semibold mb-4">General</h2>
-          
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <label>Theme</label>
-              <select
-                value={settings.general.theme}
-                onChange={(e) => handleThemeChange(e.target.value)}
-                className={`px-3 py-2 rounded-lg ${
-                  theme === 'light'
-                    ? 'bg-gray-100 border border-gray-300'
-                    : 'bg-slate-700 border border-slate-600'
-                }`}
-              >
-                <option value="dark">Dark</option>
-                <option value="light">Light</option>
-              </select>
-            </div>
+        <div className="px-3 pb-3">
+          <Input
+            ref={searchRef}
+            inputSize="sm"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search settings"
+            aria-label="Search settings"
+            leftIcon={<IconSearch size={15} />}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setQuery('');
+              // Enter takes the top hit -- the fastest path when you already
+              // know what you typed matches one thing.
+              if (e.key === 'Enter' && results.length > 0) jumpTo(results[0].panel);
+            }}
+          />
+        </div>
 
-            <div className="flex items-center justify-between">
-              <label>First-Run Setup Wizard</label>
-              <button
-                onClick={handleReplayWizard}
-                className={`px-3 py-1.5 rounded-lg transition-colors ${
-                  theme === 'light'
-                    ? 'bg-gray-100 hover:bg-gray-200 border border-gray-300'
-                    : 'bg-slate-700 hover:bg-slate-600 border border-slate-600'
-                }`}
-              >
-                Replay Setup Wizard
-              </button>
+        <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3" aria-label="Settings sections">
+          {searching ? (
+            <div>
+              <p className="microlabel px-1 pb-2 pt-1">
+                {results.length} {results.length === 1 ? 'match' : 'matches'}
+              </p>
+              {results.length === 0 ? (
+                <p className="px-1 text-[0.8125rem] leading-relaxed text-mute">
+                  Nothing matches “{query.trim()}”. Try the name of the hardware
+                  it affects, like <span className="text-ink">shader</span> or{' '}
+                  <span className="text-ink">gamepad</span>.
+                </p>
+              ) : (
+                <ul className="space-y-0.5">
+                  {results.map((entry) => (
+                    <li key={`${entry.panel}-${entry.label}`}>
+                      <button
+                        type="button"
+                        onClick={() => jumpTo(entry.panel)}
+                        className="w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-raised"
+                      >
+                        <span className="block text-[0.8125rem] font-semibold text-ink">
+                          {entry.label}
+                        </span>
+                        <span className="microlabel">
+                          {SETTINGS_PANEL_META[entry.panel].label} · {entry.section}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
-          </div>
-        </section>
+          ) : (
+            <ul className="space-y-0.5">
+              {SETTINGS_PANELS.map((id) => {
+                const item = SETTINGS_PANEL_META[id];
+                const active = panel === id;
+                return (
+                  <li key={id}>
+                    <button
+                      type="button"
+                      onClick={() => setPanel(id)}
+                      aria-current={active ? 'true' : undefined}
+                      className={`flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm font-semibold transition-colors ${
+                        active
+                          ? 'bg-accent-soft text-accent-text'
+                          : 'text-dim hover:bg-raised hover:text-ink'
+                      }`}
+                    >
+                      <span className="flex-none">{PANEL_ICONS[id]}</span>
+                      {item.label}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </nav>
+      </div>
 
-        {/* Video Settings */}
-        <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-          <h2 className="text-lg font-semibold mb-4">Video</h2>
-          
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <label>VSync</label>
-              <input
-                type="checkbox"
-                checked={settings.video.vsync}
-                onChange={(e) => handleVideoSettingChange('vsync', e.target.checked)}
-                className="w-5 h-5"
-              />
+      {/* Active panel ----------------------------------------------------- */}
+      <div ref={scrollRef} className="min-w-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl px-6 pb-12 pt-6">
+          <header className="mb-4 flex items-baseline justify-between gap-4">
+            <div>
+              <p className="eyebrow">{meta.scope}</p>
+              <h2 className="display-lg mt-1 text-ink">{meta.label}</h2>
             </div>
+            {isLoading && <span className="hint">loading…</span>}
+          </header>
 
-            <div className="flex items-center justify-between">
-              <label>Frame Limit</label>
-              <select
-                value={settings.video.frame_limit}
-                onChange={(e) => handleVideoSettingChange('frame_limit', e.target.value)}
-                className={`px-3 py-2 rounded-lg ${
-                  theme === 'light'
-                    ? 'bg-gray-100 border border-gray-300'
-                    : 'bg-slate-700 border border-slate-600'
-                }`}
-              >
-                <option value="unlimited">Unlimited</option>
-                <option value="60">60 FPS</option>
-                <option value="120">120 FPS</option>
-                <option value="144">144 FPS</option>
-              </select>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <label>Renderer</label>
-              <select
-                value={settings.video.renderer}
-                onChange={(e) => handleVideoSettingChange('renderer', e.target.value)}
-                className={`px-3 py-2 rounded-lg ${
-                  theme === 'light'
-                    ? 'bg-gray-100 border border-gray-300'
-                    : 'bg-slate-700 border border-slate-600'
-                }`}
-              >
-                <option value="webgl">WebGL</option>
-                <option value="webgpu" disabled>WebGPU (Coming soon)</option>
-              </select>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <label>Shader</label>
-              <select
-                value={settings.video.shader}
-                onChange={(e) => handleVideoSettingChange('shader', e.target.value)}
-                className={`px-3 py-2 rounded-lg ${
-                  theme === 'light'
-                    ? 'bg-gray-100 border border-gray-300'
-                    : 'bg-slate-700 border border-slate-600'
-                }`}
-              >
-                <option value="none">None</option>
-                <option value="crt">CRT</option>
-                <option value="xbrz">xBRZ</option>
-              </select>
-            </div>
-          </div>
-        </section>
-
-        {/* Audio Settings */}
-        <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-          <h2 className="text-lg font-semibold mb-4">Audio</h2>
-          
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <label>Enable Audio</label>
-              <input
-                type="checkbox"
-                checked={settings.audio.enabled}
-                onChange={(e) => handleAudioSettingChange('enabled', e.target.checked)}
-                className="w-5 h-5"
-              />
-            </div>
-
-            <div className="flex items-center justify-between">
-              <label>Volume</label>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.1"
-                value={settings.audio.volume}
-                onChange={(e) => handleAudioSettingChange('volume', parseFloat(e.target.value))}
-                className="w-32"
-              />
-            </div>
-
-            <div className="flex items-center justify-between">
-              <label>Latency (ms)</label>
-              <input
-                type="number"
-                value={settings.audio.latency}
-                onChange={(e) => handleAudioSettingChange('latency', parseInt(e.target.value))}
-                className={`w-20 px-2 py-1 rounded ${
-                  theme === 'light'
-                    ? 'bg-gray-100 border border-gray-300'
-                    : 'bg-slate-700 border border-slate-600'
-                }`}
-              />
-            </div>
-          </div>
-        </section>
-
-        {/* Controls */}
-        <section className={`rounded-lg p-6 ${theme === 'light' ? 'bg-white' : 'bg-slate-800'}`}>
-          <h2 className="text-lg font-semibold mb-4">Controls</h2>
-          
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <label>Keyboard Input</label>
-              <input
-                type="checkbox"
-                checked={settings.controls.keyboard_enabled}
-                onChange={(e) => saveSettings({
-                  ...settings,
-                  controls: { ...settings.controls, keyboard_enabled: e.target.checked },
-                })}
-                className="w-5 h-5"
-              />
-            </div>
-
-            <div className="flex items-center justify-between">
-              <label>Gamepad Input</label>
-              <input
-                type="checkbox"
-                checked={settings.controls.gamepad_enabled}
-                onChange={(e) => saveSettings({
-                  ...settings,
-                  controls: { ...settings.controls, gamepad_enabled: e.target.checked },
-                })}
-                className="w-5 h-5"
-              />
-            </div>
-          </div>
-        </section>
+          {panel === 'video' && <VideoSettings />}
+          {panel === 'audio' && <AudioSettings />}
+          {panel === 'controls' && <ControllerSettings />}
+          {panel === 'library' && <LibrarySettings />}
+          {panel === 'general' && <GeneralSettings onRelaunchWizard={onRelaunchWizard} />}
+        </div>
       </div>
     </div>
   );
