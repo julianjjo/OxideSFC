@@ -90,13 +90,22 @@ body {
    aligning digit-for-digit, it isn't a register.
 
    `.microlabel` is the *visual* treatment for micro caps: mono, tracked wide,
-   uppercase. `.eyebrow` is one semantic use of it -- naming a section by the
-   hardware it governs (PPU / OUTPUT, S-DSP / APU, JOYPAD 1-2). They are split
-   because the two were conflated: `.eyebrow` got reused as a data label in the
-   library's stat lists, where nothing is being named by its hardware scope, and
-   overloading it that way erodes the one thing its name promises. Reach for
-   `.microlabel` for a caption or a data label; reach for `.eyebrow` only when
+   uppercase. `.eyebrow` is one semantic use of it: **heading a section**.
+
+   The split is between a section heading and a data label, and nothing else.
+   `.eyebrow` got reused as the `<dt>` of the library's stat lists, which heads
+   no section, and overloading it that way erodes the one thing its name
+   promises. So: `.microlabel` for a caption or a data label, `.eyebrow` when
    heading a section.
+
+   Where a section governs hardware, name it for that hardware -- PPU / OUTPUT,
+   S-DSP / APU, JOYPAD 1-2 -- because that is the most useful thing to call it.
+   That is guidance on *wording*, not a gate on the class: plenty of real
+   sections have no silicon behind them (Continue, Collections, Views, History,
+   Maintenance) and they are still sections. Splitting those out into a third,
+   identically-styled class would be a distinction without a difference, and
+   would push section headings back onto the data-label class this split exists
+   to keep them off.
    =========================================================================== */
 
 .register {
