@@ -86,7 +86,7 @@ export function CollectionPicker({ gameId, onChange }: CollectionPickerProps) {
   };
 
   if (isLoading) {
-    return <p className="register">loading collections…</p>;
+    return <p className="hint">loading collections…</p>;
   }
 
   if (folders.length === 0) {

@@ -287,7 +287,7 @@ export function ControllerSettings() {
           }
         >
           {pads.length === 0 ? (
-            <span className="register">none detected</span>
+            <span className="hint">none detected</span>
           ) : (
             <span className="chip chip--accent">
               {pads.length} {pads.length === 1 ? 'pad' : 'pads'}

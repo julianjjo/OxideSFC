@@ -144,11 +144,6 @@ impl EmulationController {
     pub fn load_rom(&mut self, path: &str) -> Result<GameInfo, String> {
         info!("Loading ROM: {}", path);
 
-        // Same reason as in `start()`: loading another cartridge ends the previous
-        // session, and its accumulated seconds have to be banked before the
-        // `current_game_id` they belong to is replaced.
-        self.flush_play_time();
-
         let path_buf = PathBuf::from(path);
         if !path_buf.exists() {
             return Err(format!("File not found: {}", path));
@@ -198,6 +193,13 @@ impl EmulationController {
                 game_info.validation_warnings
             );
         }
+
+        // Bank the outgoing session's seconds, now that the replacement is known
+        // good. Every `?` and early return above this point leaves the previous
+        // game loaded and running, so flushing before them would consume
+        // `session_start` for a swap that never happened and stop counting time
+        // for a game still on screen.
+        self.flush_play_time();
 
         self.snes = Some(snes);
         self.current_game = Some(game_info.clone());

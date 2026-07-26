@@ -408,7 +408,7 @@ export function WelcomeWizard({
                 >
                   <span className="mb-2 block font-mono text-3xl text-accent-text">⌨</span>
                   <span className="block font-semibold text-ink">Keyboard</span>
-                  <span className="register mt-1 block">always available</span>
+                  <span className="hint mt-1 block">always available</span>
                 </button>
 
                 <button
@@ -435,7 +435,7 @@ export function WelcomeWizard({
                     <IconGamepad size={32} />
                   </span>
                   <span className="block font-semibold text-ink">Gamepad</span>
-                  <span className="register mt-1 block">
+                  <span className="hint mt-1 block">
                     {connectedPads > 0 ? `${connectedPads} connected` : 'none detected yet'}
                   </span>
                 </button>
@@ -659,7 +659,7 @@ export function WelcomeWizard({
                   <div className="h-1.5 overflow-hidden rounded-full bg-line">
                     <div className="sfc-pinstripe h-full animate-pulse" />
                   </div>
-                  <p className="register mt-2">scanning folder…</p>
+                  <p className="hint mt-2">scanning folder…</p>
                 </div>
               )}
             </div>

@@ -36,10 +36,15 @@ for (const [panel, file] of Object.entries(PANEL_FILES)) {
   panelSources[panel] = readFileSync(join(settingsDir, file), 'utf8');
 }
 
-// Matches the entry shape the index is written in. Deliberately strict: if the
-// formatting changes enough to stop matching, the count assertion at the end
-// fails loudly rather than silently checking nothing.
-const ENTRY = /label: '([^']+)',\s*\n\s*panel: '([^']+)',\s*\n\s*section: '([^']+)'/g;
+// Matches the entry shape the index is written in, in either quote style.
+//
+// Quote-agnostic on purpose. Hardcoding single quotes here *and* in the
+// cross-check below meant a reformat to double quotes would drop both counts to
+// zero, `checked === declared` would still hold at 0 === 0, and the script would
+// report success while validating nothing — precisely the failure the count
+// assertion exists to catch. The floor check below closes the rest of that hole.
+const ENTRY =
+  /label:\s*(['"])(.+?)\1,\s*\n\s*panel:\s*(['"])(.+?)\3,\s*\n\s*section:\s*(['"])(.+?)\5/g;
 
 /** Is `text` present as a single- or double-quoted literal in `source`? */
 function hasLiteral(source, text) {
@@ -49,7 +54,7 @@ function hasLiteral(source, text) {
 const problems = [];
 let checked = 0;
 
-for (const [, label, panel, section] of indexSource.matchAll(ENTRY)) {
+for (const [, , label, , panel, , section] of indexSource.matchAll(ENTRY)) {
   checked++;
 
   const source = panelSources[panel];
@@ -65,10 +70,22 @@ for (const [, label, panel, section] of indexSource.matchAll(ENTRY)) {
   }
 }
 
-const declared = (indexSource.match(/panel: '/g) ?? []).length;
+const declared = (indexSource.match(/panel:\s*['"]/g) ?? []).length;
 if (checked !== declared) {
   problems.push(
     `parsed ${checked} entries but found ${declared} "panel:" keys — the entry format changed, so this check is no longer reading the whole index`
+  );
+}
+
+// An absolute floor, not just agreement between the two counts. Both are derived
+// from the same file by the same kind of pattern, so a formatting change can move
+// them together: at zero they agree and the equality check above passes while
+// nothing has been validated. A settings screen with no indexed entries is itself
+// a bug, so zero is never a legitimate answer.
+const MINIMUM_ENTRIES = 20;
+if (checked < MINIMUM_ENTRIES) {
+  problems.push(
+    `only parsed ${checked} entries, expected at least ${MINIMUM_ENTRIES} — either the index lost most of its content or this script can no longer read its format`
   );
 }
 

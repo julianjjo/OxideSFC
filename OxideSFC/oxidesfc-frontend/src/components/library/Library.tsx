@@ -332,7 +332,7 @@ export function Library({ onPlayGame }: LibraryProps) {
   if (isLoading && games.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
-        <p className="register">loading library…</p>
+        <p className="hint">loading library…</p>
       </div>
     );
   }

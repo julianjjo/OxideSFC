@@ -150,7 +150,7 @@ export function CollectionFolders({
       </div>
 
       {isLoading ? (
-        <p className="register px-2">loading…</p>
+        <p className="hint px-2">loading…</p>
       ) : folders.length === 0 ? (
         <p className="px-2 text-[0.8125rem] leading-relaxed text-mute">
           No collections yet. Make one, then add games by dragging them onto it —

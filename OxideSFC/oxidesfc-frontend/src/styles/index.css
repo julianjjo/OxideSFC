@@ -117,6 +117,18 @@ body {
   color: var(--text-mute);
 }
 
+/* Small muted prose: status lines ("loading collections…", "none detected"),
+   inline instructions ("Esc or click outside to close"), asides.
+   This exists because its absence is what made `.register` rot: with no
+   primitive for quiet sentences, the monospace value voice got used for them,
+   which is exactly the "dress up prose" failure its own contract forbids.
+   Sans, not mono -- these are sentences, not values to align. */
+.hint {
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-mute);
+}
+
 .microlabel,
 .eyebrow {
   font-family: var(--font-mono);

@@ -306,7 +306,7 @@ export function QuickMenu({
             ))}
           </div>
 
-          <p className="register mt-4 text-center">Esc or click outside to close</p>
+          <p className="hint mt-4 text-center">Esc or click outside to close</p>
         </div>
       </div>
 

@@ -133,7 +133,7 @@ export function FilterSidebar({
             <button
               type="button"
               onClick={() => onChange({ ...filters, regions: [] })}
-              className="register hover:text-ink"
+              className="hint hover:text-ink"
             >
               clear
             </button>

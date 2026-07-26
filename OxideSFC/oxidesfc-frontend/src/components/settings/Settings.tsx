@@ -122,7 +122,7 @@ export function Settings({ onRelaunchWizard }: SettingsProps) {
                         <span className="block text-[0.8125rem] font-semibold text-ink">
                           {entry.label}
                         </span>
-                        <span className="register">
+                        <span className="microlabel">
                           {SETTINGS_PANEL_META[entry.panel].label} · {entry.section}
                         </span>
                       </button>
@@ -167,7 +167,7 @@ export function Settings({ onRelaunchWizard }: SettingsProps) {
               <p className="eyebrow">{meta.scope}</p>
               <h2 className="display-lg mt-1 text-ink">{meta.label}</h2>
             </div>
-            {isLoading && <span className="register">loading…</span>}
+            {isLoading && <span className="hint">loading…</span>}
           </header>
 
           {panel === 'video' && <VideoSettings />}
