@@ -57,6 +57,92 @@ pub fn add_play_seconds_to_file(game_id: &str, seconds: u64) -> Result<(), Strin
     Ok(())
 }
 
+/// Records the start of a play session: bumps `play_count` and stamps
+/// `last_played`.
+///
+/// These two fields existed on `Game`, were serialised, and were read by the
+/// library UI -- but nothing ever wrote them, so both stayed at their scan-time
+/// defaults (0 and null) forever. Only `total_play_seconds` was being recorded.
+/// The visible effect was that "Continue" and "Recently played" could never show
+/// anything, and the library's play-count and last-played columns were
+/// permanently blank no matter how much a game had been played.
+///
+/// Shares `PLAY_TIME_LOCK` with `add_play_seconds_to_file` for the same reason:
+/// both are read-modify-write cycles over `library.json` reached from
+/// `EmulationController`, which has no access to `AppState.library_lock`.
+pub fn record_play_start(game_id: &str) -> Result<(), String> {
+    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut games = get_games_for_mutation()?;
+    if let Some(game) = games.iter_mut().find(|g| g.id == game_id) {
+        game.play_count = game.play_count.saturating_add(1);
+        game.last_played = Some(chrono::Utc::now().to_rfc3339());
+        game.updated_at = chrono::Utc::now().to_rfc3339();
+        save_games(&games)?;
+    } else {
+        warn!("record_play_start: game not found: {}", game_id);
+    }
+
+    Ok(())
+}
+
+/// One library entry by id, or `None` if it is not in the library.
+///
+/// Read-only, so it takes no lock: a torn read cannot happen because
+/// `save_games` writes through a temp file and renames, so a reader sees either
+/// the whole old file or the whole new one.
+pub fn get_game_by_id(game_id: &str) -> Result<Option<Game>, String> {
+    let games = get_games_for_mutation()?;
+    Ok(games.into_iter().find(|g| g.id == game_id))
+}
+
+/// Point a library entry at (or away from) a cover image.
+///
+/// Shares `PLAY_TIME_LOCK` with the other `library.json` read-modify-write
+/// helpers reached from outside `AppState`: cover fetching runs several games
+/// concurrently, so without a shared lock two finishing downloads would each
+/// write back a copy of the file read before the other's update and one would be
+/// lost.
+pub fn set_cover_file(game_id: &str, cover_file: Option<String>) -> Result<(), String> {
+    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut games = get_games_for_mutation()?;
+    if let Some(game) = games.iter_mut().find(|g| g.id == game_id) {
+        if game.cover_file == cover_file {
+            return Ok(());
+        }
+        game.cover_file = cover_file;
+        game.updated_at = chrono::Utc::now().to_rfc3339();
+        save_games(&games)?;
+    } else {
+        warn!("set_cover_file: game not found: {}", game_id);
+    }
+
+    Ok(())
+}
+
+/// Set `cover_file` on every entry at once, for cache-wide operations.
+pub fn set_cover_file_for_all(cover_file: Option<String>) -> Result<(), String> {
+    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut games = get_games_for_mutation()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut changed = false;
+    for game in games.iter_mut() {
+        if game.cover_file != cover_file {
+            game.cover_file = cover_file.clone();
+            game.updated_at = now.clone();
+            changed = true;
+        }
+    }
+
+    if changed {
+        save_games(&games)?;
+    }
+
+    Ok(())
+}
+
 pub(super) fn get_library_path() -> Result<PathBuf, String> {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))

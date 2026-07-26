@@ -1,289 +1,175 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Button } from '../common/Button';
-import { Input } from '../common/Input';
-import { Select } from '../common/Select';
+import { IconLibrary, IconStar, IconClock } from '../common/icons';
 
-interface FilterSidebarProps {
-  theme?: 'dark' | 'light';
-  onFilterChange?: (filters: FilterState) => void;
-  initialFilters?: FilterState;
-}
+/** Quick views: predefined slices of the library. */
+export type QuickView = 'all' | 'favorites' | 'recent';
 
 export interface FilterState {
-  searchQuery: string;
-  systems: string[];
+  quickView: QuickView;
+  /** Selected region values, matching `Game.country` lowercased. Empty = any. */
   regions: string[];
-  genres: string[];
-  sortBy: 'title' | 'date_added' | 'last_played' | 'play_count';
-  sortOrder: 'asc' | 'desc';
 }
 
-interface FilterOption {
-  value: string;
-  label: string;
-  count?: number;
+export const EMPTY_FILTERS: FilterState = { quickView: 'all', regions: [] };
+
+interface FilterSidebarProps {
+  filters: FilterState;
+  onChange: (filters: FilterState) => void;
+  /** Total games, for the "All games" count. */
+  totalCount: number;
+  favoriteCount: number;
+  /** Bumped by the library after a scan so the region counts refresh. */
+  refreshKey?: number;
 }
 
-// Available systems
-const SYSTEMS: FilterOption[] = [
-  { value: 'snes', label: 'Super Nintendo' },
-  { value: 'sfc', label: 'Super Famicom' },
-];
-
-// Available regions. `value` matches the lowercased form of the backend's
-// `Game.country` string (see `rom::header::Country::as_str()` in
-// src-tauri/src/rom/header.rs -- "USA", "Japan", "Europe", "Brazil", etc.)
-// so counts from `get_filter_counts` can be looked up case-insensitively
-// below. "Korea"/"International" have no corresponding `Country` variant on
-// the backend today, so their counts will simply never show a number --
-// that's expected, not a bug.
-const REGIONS: FilterOption[] = [
+/**
+ * Region values, matching the lowercased form of the backend's `Game.country`
+ * string (see `Country::as_str()` in src-tauri/src/rom/header.rs) so counts from
+ * `get_filter_counts` can be looked up case-insensitively.
+ *
+ * Only regions the backend can actually report are listed. The previous version
+ * also offered Korea and International, which have no corresponding `Country`
+ * variant -- they were permanently empty checkboxes that could only ever filter
+ * the library down to nothing.
+ */
+const REGIONS: Array<{ value: string; label: string }> = [
   { value: 'usa', label: 'USA' },
-  { value: 'europe', label: 'Europe' },
   { value: 'japan', label: 'Japan' },
-  { value: 'korea', label: 'Korea' },
+  { value: 'europe', label: 'Europe' },
   { value: 'brazil', label: 'Brazil' },
-  { value: 'international', label: 'International' },
 ];
 
-// Sort options
-const SORT_OPTIONS: FilterOption[] = [
-  { value: 'title', label: 'Title' },
-  { value: 'date_added', label: 'Date Added' },
-  { value: 'last_played', label: 'Last Played' },
-  { value: 'play_count', label: 'Play Count' },
+const QUICK_VIEWS: Array<{ value: QuickView; label: string; icon: React.ReactNode }> = [
+  { value: 'all', label: 'All games', icon: <IconLibrary size={16} /> },
+  { value: 'favorites', label: 'Favourites', icon: <IconStar size={16} /> },
+  { value: 'recent', label: 'Recently played', icon: <IconClock size={16} /> },
 ];
 
+/**
+ * Library facets.
+ *
+ * Deliberately narrow: quick views and region only. Search and sort used to live
+ * here as well, duplicating the toolbar's own search field and sort menu — two
+ * controls for the same state, either of which could contradict the other. Those
+ * belong to the toolbar because they act on what you are looking at; a facet
+ * chooses *which set* you are looking at.
+ */
 export function FilterSidebar({
-  theme = 'dark',
-  onFilterChange,
-  initialFilters,
+  filters,
+  onChange,
+  totalCount,
+  favoriteCount,
+  refreshKey = 0,
 }: FilterSidebarProps) {
-  const [filters, setFilters] = useState<FilterState>(initialFilters || {
-    searchQuery: '',
-    systems: [],
-    regions: [],
-    genres: [],
-    sortBy: 'title',
-    sortOrder: 'asc',
-  });
-
   const [regionCounts, setRegionCounts] = useState<Record<string, number>>({});
 
   useEffect(() => {
-    loadFilterCounts();
-  }, []);
+    invoke<{ regions: Record<string, number> }>('get_filter_counts')
+      .then((counts) => {
+        // Keys come back capitalised to match `Country::as_str()`; normalise so
+        // they can be looked up by this file's lowercase values.
+        const normalized: Record<string, number> = {};
+        for (const [region, count] of Object.entries(counts.regions || {})) {
+          normalized[region.toLowerCase()] = count;
+        }
+        setRegionCounts(normalized);
+      })
+      .catch((error) => {
+        console.error('Failed to load filter counts:', error);
+        setRegionCounts({});
+      });
+  }, [refreshKey]);
 
-  useEffect(() => {
-    onFilterChange?.(filters);
-  }, [filters, onFilterChange]);
-
-  const loadFilterCounts = async () => {
-    try {
-      // Backend only tracks region counts (`Game.country`) -- there is no
-      // genre field anywhere in the ROM header parsing or the `Game`
-      // struct, so no genre counts exist to load. Region keys come back
-      // capitalized (e.g. "USA", "Japan") to match `Country::as_str()`;
-      // normalize to lowercase here so they can be looked up by this file's
-      // lowercase `REGIONS[].value`s.
-      const counts = await invoke<{ regions: Record<string, number> }>('get_filter_counts');
-      const normalized: Record<string, number> = {};
-      for (const [region, count] of Object.entries(counts.regions || {})) {
-        normalized[region.toLowerCase()] = count;
-      }
-      setRegionCounts(normalized);
-    } catch (error) {
-      console.error('Failed to load filter counts:', error);
-    }
+  const toggleRegion = (value: string) => {
+    const regions = filters.regions.includes(value)
+      ? filters.regions.filter((r) => r !== value)
+      : [...filters.regions, value];
+    onChange({ ...filters, regions });
   };
 
-  const handleSearchChange = (value: string) => {
-    setFilters(prev => ({ ...prev, searchQuery: value }));
-  };
+  const quickViewCount = (view: QuickView) =>
+    view === 'favorites' ? favoriteCount : view === 'all' ? totalCount : null;
 
-  const handleSortByChange = (value: string) => {
-    setFilters(prev => ({ 
-      ...prev, 
-      sortBy: value as FilterState['sortBy'] 
-    }));
-  };
-
-  const handleSortOrderToggle = () => {
-    setFilters(prev => ({ 
-      ...prev, 
-      sortOrder: prev.sortOrder === 'asc' ? 'desc' : 'asc' 
-    }));
-  };
-
-  const handleToggleFilter = (
-    category: 'systems' | 'regions' | 'genres',
-    value: string
-  ) => {
-    setFilters(prev => {
-      const current = prev[category];
-      const updated = current.includes(value)
-        ? current.filter(v => v !== value)
-        : [...current, value];
-      return { ...prev, [category]: updated };
-    });
-  };
-
-  const handleClearFilters = () => {
-    setFilters({
-      searchQuery: '',
-      systems: [],
-      regions: [],
-      genres: [],
-      sortBy: 'title',
-      sortOrder: 'asc',
-    });
-  };
-
-  const hasActiveFilters = 
-    filters.systems.length > 0 ||
-    filters.regions.length > 0 ||
-    filters.genres.length > 0 ||
-    filters.searchQuery.length > 0;
-
-  const containerClass = theme === 'light'
-    ? 'bg-white border-gray-200'
-    : 'bg-slate-800 border-slate-700';
-
-  const textClass = theme === 'light'
-    ? 'text-gray-700'
-    : 'text-slate-200';
-
-  const mutedClass = theme === 'light'
-    ? 'text-gray-500'
-    : 'text-slate-400';
-
-  const inputClass = theme === 'light'
-    ? 'bg-gray-100 border-gray-300'
-    : 'bg-slate-700 border-slate-600';
-
-  const checkboxClass = theme === 'light'
-    ? 'border-gray-300 bg-white'
-    : 'border-slate-500 bg-slate-700';
+  // Regions with nothing behind them are shown but disabled, so the set of
+  // facets stays stable as the library grows instead of controls appearing and
+  // vanishing between scans.
+  const availableRegions = REGIONS.filter((r) => (regionCounts[r.value] ?? 0) > 0);
+  const shownRegions = availableRegions.length > 0 ? availableRegions : REGIONS;
 
   return (
-    <div className={`h-full flex flex-col rounded-lg border ${containerClass}`}>
-      {/* Header */}
-      <div className={`p-4 border-b ${theme === 'light' ? 'border-gray-200' : 'border-slate-700'}`}>
-        <div className="flex items-center justify-between">
-          <h2 className={`font-semibold ${textClass}`}>Filters</h2>
-          {hasActiveFilters && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleClearFilters}
+    <div className="space-y-5">
+      <div>
+        <p className="eyebrow mb-2 px-1">Views</p>
+        <ul className="space-y-0.5">
+          {QUICK_VIEWS.map((view) => {
+            const active = filters.quickView === view.value;
+            const count = quickViewCount(view.value);
+            return (
+              <li key={view.value}>
+                <button
+                  type="button"
+                  onClick={() => onChange({ ...filters, quickView: view.value })}
+                  aria-current={active ? 'true' : undefined}
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[0.8125rem] font-semibold transition-colors ${
+                    active
+                      ? 'bg-accent-soft text-accent-text'
+                      : 'text-dim hover:bg-raised hover:text-ink'
+                  }`}
+                >
+                  <span className="flex-none">{view.icon}</span>
+                  <span className="min-w-0 flex-1 truncate">{view.label}</span>
+                  {count !== null && <span className="register flex-none">{count}</span>}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      <div>
+        <div className="mb-2 flex items-center justify-between px-1">
+          <p className="eyebrow">Region</p>
+          {filters.regions.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onChange({ ...filters, regions: [] })}
+              className="register hover:text-ink"
             >
-              Clear All
-            </Button>
+              clear
+            </button>
           )}
         </div>
+        <ul className="space-y-0.5">
+          {shownRegions.map((region) => {
+            const count = regionCounts[region.value] ?? 0;
+            const checked = filters.regions.includes(region.value);
+            return (
+              <li key={region.value}>
+                <label
+                  className={`flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[0.8125rem] transition-colors ${
+                    count === 0
+                      ? 'cursor-not-allowed text-mute opacity-50'
+                      : checked
+                        ? 'bg-accent-soft text-accent-text'
+                        : 'text-dim hover:bg-raised hover:text-ink'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={count === 0}
+                    onChange={() => toggleRegion(region.value)}
+                    className="h-3.5 w-3.5 flex-none rounded border-line accent-[var(--accent-solid)]"
+                  />
+                  <span className="min-w-0 flex-1 truncate font-semibold">{region.label}</span>
+                  <span className="register flex-none">{count}</span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
       </div>
-
-      {/* Search */}
-      <div className="p-4 border-b border-slate-700">
-        <div className="relative">
-          <Input
-            label="Search"
-            value={filters.searchQuery}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            placeholder="Search games..."
-            className={inputClass}
-          />
-          <svg 
-            className={`absolute right-3 top-9 w-4 h-4 ${mutedClass}`} 
-            fill="none" 
-            viewBox="0 0 24 24" 
-            stroke="currentColor"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-        </div>
-      </div>
-
-      {/* Sort Options */}
-      <div className="p-4 border-b border-slate-700">
-        <h3 className={`text-sm font-medium mb-3 ${textClass}`}>Sort By</h3>
-        <div className="space-y-2">
-          <Select
-            value={filters.sortBy}
-            onChange={(e) => handleSortByChange(e.target.value)}
-            options={SORT_OPTIONS}
-          />
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleSortOrderToggle}
-            className="w-full"
-          >
-            <span className="flex items-center justify-center gap-2">
-              {filters.sortOrder === 'asc' ? '↑ Ascending' : '↓ Descending'}
-            </span>
-          </Button>
-        </div>
-      </div>
-
-      {/* System Filter */}
-      <div className="p-4 border-b border-slate-700">
-        <h3 className={`text-sm font-medium mb-3 ${textClass}`}>System</h3>
-        <div className="space-y-2">
-          {SYSTEMS.map((system) => (
-            <label
-              key={system.value}
-              className={`flex items-center gap-2 cursor-pointer ${
-                filters.systems.includes(system.value) ? 'text-primary-500' : textClass
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={filters.systems.includes(system.value)}
-                onChange={() => handleToggleFilter('systems', system.value)}
-                className={`rounded ${checkboxClass}`}
-              />
-              <span className="flex-1 text-sm">{system.label}</span>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      {/* Region Filter */}
-      <div className="p-4 border-b border-slate-700">
-        <h3 className={`text-sm font-medium mb-3 ${textClass}`}>Region</h3>
-        <div className="space-y-2 max-h-40 overflow-auto">
-          {REGIONS.map((region) => (
-            <label
-              key={region.value}
-              className={`flex items-center gap-2 cursor-pointer ${
-                filters.regions.includes(region.value) ? 'text-primary-500' : textClass
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={filters.regions.includes(region.value)}
-                onChange={() => handleToggleFilter('regions', region.value)}
-                className={`rounded ${checkboxClass}`}
-              />
-              <span className="flex-1 text-sm">{region.label}</span>
-              {regionCounts[region.value] !== undefined && (
-                <span className={`text-xs ${mutedClass}`}>
-                  ({regionCounts[region.value]})
-                </span>
-              )}
-            </label>
-          ))}
-        </div>
-      </div>
-
-      {/* Genre Filter intentionally omitted: there is no genre field
-          anywhere in `Game` or the ROM header parsing (see
-          `get_filter_counts` in src-tauri/src/commands/library.rs), so a
-          genre section here would only ever show checkboxes with no counts
-          behind them. `FilterState.genres` is kept (always empty) so
-          existing consumers of `onFilterChange` don't need shape changes. */}
     </div>
   );
 }

@@ -3,32 +3,38 @@ import { Library } from './components/library/Library';
 import { Settings } from './components/settings/Settings';
 import { EmulatorView } from './components/emulator/EmulatorView';
 import { WelcomeWizard } from './components/wizard/WelcomeWizard';
+import { NavRail, type AppView } from './components/shell/NavRail';
 import { useSettingsStore } from './stores/settingsStore';
 import { useEmulationStore } from './stores/emulationStore';
 
-type View = 'library' | 'settings' | 'emulator';
-
 function App() {
-  const [currentView, setCurrentView] = useState<View>('library');
+  const [currentView, setCurrentView] = useState<AppView>('library');
   const [showWizard, setShowWizard] = useState(false);
   const [wizardIsRerun, setWizardIsRerun] = useState(false);
-  const { settings, isLoading, loadSettings, updateSettings } = useSettingsStore();
-  const { isRunning } = useEmulationStore();
+  const { settings, hasLoaded, loadSettings, updateSettings } = useSettingsStore();
+  const { isRunning, isPaused, currentGame } = useEmulationStore();
 
   // Load persisted settings once at startup so we know whether first-run
-  // onboarding has already been completed.
+  // onboarding has already been completed. loadSettings() also pushes the
+  // stored theme/accent onto <html> (see the store's syncAppearance), so there
+  // is no separate appearance effect to keep in step here.
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
 
-  // First-run check: show the wizard until the user finishes it once. Wait
-  // for the real persisted value to load before deciding, so returning
-  // users don't see the wizard flash before settings arrive from disk.
+  // First-run check: show the wizard until the user finishes it once.
+  //
+  // Gated on `hasLoaded`, not on `isLoading`. `isLoading` is false before the
+  // first load is even kicked off, and `has_completed_onboarding` defaults to
+  // false, so the old `!isLoading && !completed` test fired on the very first
+  // render for everyone -- and since this effect only ever *opens* the wizard,
+  // the real persisted `true` arriving a moment later could not close it again.
+  // Every returning user got the setup wizard on every launch.
   useEffect(() => {
-    if (!isLoading && !settings.general.has_completed_onboarding) {
+    if (hasLoaded && !settings.general.has_completed_onboarding) {
       setShowWizard(true);
     }
-  }, [isLoading, settings.general.has_completed_onboarding]);
+  }, [hasLoaded, settings.general.has_completed_onboarding]);
 
   const handleWizardComplete = async () => {
     setShowWizard(false);
@@ -52,64 +58,29 @@ function App() {
     setShowWizard(true);
   };
 
-  // Apply theme
-  const theme = settings.general.theme || 'dark';
-
-  // The emulator view is chromeless: the game gets the entire window and all
-  // controls live in its own auto-hiding control deck (exit/settings included),
-  // so the global header only renders outside of gameplay.
+  // The emulator view is chromeless: the game gets the entire window and every
+  // control lives in its own auto-hiding deck, so the rail steps aside during
+  // play the same way the old header did.
   const inEmulator = currentView === 'emulator';
 
   return (
-    <div className={`h-screen flex flex-col ${theme === 'light' ? 'bg-gray-100' : 'bg-slate-900'}`}>
-      {/* Header / Navigation */}
+    <div className="flex h-screen overflow-hidden bg-void text-ink">
       {!inEmulator && (
-      <header className={`flex items-center justify-between px-4 py-3 ${theme === 'light' ? 'bg-white border-b border-gray-200' : 'bg-slate-800 border-b border-slate-700'}`}>
-        <div className="flex items-center gap-6">
-          <h1 className="text-xl font-bold text-primary-500">OxideSFC</h1>
-          <nav className="flex gap-4">
-            <button
-              onClick={() => setCurrentView('library')}
-              className={`px-3 py-1.5 rounded-md transition-colors ${
-                currentView === 'library'
-                  ? 'bg-primary-600 text-white'
-                  : theme === 'light'
-                  ? 'text-gray-700 hover:bg-gray-100'
-                  : 'text-slate-300 hover:bg-slate-700'
-              }`}
-            >
-              Library
-            </button>
-            <button
-              onClick={() => setCurrentView('settings')}
-              className={`px-3 py-1.5 rounded-md transition-colors ${
-                currentView === 'settings'
-                  ? 'bg-primary-600 text-white'
-                  : theme === 'light'
-                  ? 'text-gray-700 hover:bg-gray-100'
-                  : 'text-slate-300 hover:bg-slate-700'
-              }`}
-            >
-              Settings
-            </button>
-          </nav>
-        </div>
-
-        {isRunning && (
-          <button
-            onClick={() => setCurrentView('emulator')}
-            className="px-4 py-1.5 bg-red-600 hover:bg-red-700 rounded-md transition-colors"
-          >
-            Back to Game
-          </button>
-        )}
-      </header>
+        <NavRail
+          view={currentView}
+          onNavigate={setCurrentView}
+          runningTitle={isRunning && currentGame ? currentGame.title : null}
+          isPaused={isPaused}
+        />
       )}
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-hidden">
-        {currentView === 'library' && <Library onPlayGame={() => setCurrentView('emulator')} />}
-        {currentView === 'settings' && <Settings onRelaunchWizard={handleRelaunchWizard} />}
+      <main className="min-w-0 flex-1 overflow-hidden">
+        {currentView === 'library' && (
+          <Library onPlayGame={() => setCurrentView('emulator')} />
+        )}
+        {currentView === 'settings' && (
+          <Settings onRelaunchWizard={handleRelaunchWizard} />
+        )}
         {currentView === 'emulator' && (
           <EmulatorView
             onExit={() => setCurrentView('library')}

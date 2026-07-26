@@ -77,6 +77,17 @@ pub struct ControlSettings {
     pub gamepad_enabled: bool,
     pub keyboard_mapping: HashMap<String, String>,
     pub gamepad_profile: String,
+    /// Analog-stick deadzone as a 0.0-0.5 fraction of full deflection. The
+    /// controller settings UI used to hold this in component-local state
+    /// only, so every adjustment was silently lost on unmount;
+    /// `#[serde(default)]` keeps settings.json files written before the field
+    /// existed loadable.
+    #[serde(default = "default_gamepad_deadzone")]
+    pub gamepad_deadzone: f32,
+}
+
+fn default_gamepad_deadzone() -> f32 {
+    0.1
 }
 
 impl Default for ControlSettings {
@@ -102,6 +113,7 @@ impl Default for ControlSettings {
             gamepad_enabled: true,
             keyboard_mapping: mapping,
             gamepad_profile: "default".to_string(),
+            gamepad_deadzone: default_gamepad_deadzone(),
         }
     }
 }
@@ -144,6 +156,18 @@ pub struct GeneralSettings {
     pub confirm_on_exit: bool,
     #[serde(default)]
     pub has_completed_onboarding: bool,
+    /// UI accent colour, named after the Super Famicom face button whose hue
+    /// it borrows: "red" | "yellow" | "green" | "blue" (see `tokens.css`).
+    /// `#[serde(default)]` so pre-existing settings.json files still load --
+    /// and note the struct has no `deny_unknown_fields`, so without a real
+    /// field here the frontend's value would be dropped on load and then
+    /// overwritten on the next save.
+    #[serde(default = "default_accent")]
+    pub accent: String,
+}
+
+fn default_accent() -> String {
+    "blue".to_string()
 }
 
 impl Default for GeneralSettings {
@@ -154,6 +178,7 @@ impl Default for GeneralSettings {
             show_window_on_start: true,
             confirm_on_exit: true,
             has_completed_onboarding: false,
+            accent: default_accent(),
         }
     }
 }

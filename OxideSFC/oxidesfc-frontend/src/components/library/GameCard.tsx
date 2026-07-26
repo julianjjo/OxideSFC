@@ -1,68 +1,126 @@
-import { Game } from '../../stores/libraryStore';
+import type { DragEvent } from 'react';
+import type { Game } from '../../stores/libraryStore';
+import { cartToneClass } from '../../domain/cartTone';
+import { displayTitle, formatRomSize, regionCode, regionTag } from '../../domain/romFormat';
+import { coverSrc } from '../../domain/coverArt';
+import { IconPlaySolid, IconStar, IconInfo } from '../common/icons';
 
 interface GameCardProps {
   game: Game;
   onPlay: (game: Game) => void;
   onDetails?: (game: Game) => void;
-  theme: string;
+  onToggleFavorite?: (game: Game) => void;
+  /** Staggered entrance delay in ms, set by the grid. */
+  revealDelay?: number;
+  /** Absolute covers directory, needed to build a renderable image src. */
+  coversDir?: string | null;
 }
 
-export function GameCard({ game, onPlay, onDetails, theme }: GameCardProps) {
-  const formatFileSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+/**
+ * The library's signature element: a game drawn as a Super Famicom cartridge.
+ *
+ * Cover art for SNES ROMs is the exception, not the rule, and the previous card
+ * rendered every artless game as the same game-pad emoji on a grey 16:9 tile --
+ * a shelf where nothing was distinguishable and nothing looked like software.
+ *
+ * So the artless case is the designed case. Each card is a cart face: the
+ * chamfered top-right shoulder that keeps a real cart from going in backwards,
+ * a label field tinted from one of eight tones hashed off the title (stable for
+ * the life of the library, so the colour becomes part of how you recognise the
+ * game), the ridge hatching moulded above the label recess, and the header's own
+ * data set in the register face where a cart carries its part number.
+ *
+ * When cover art does exist it fills the frame and the tone survives as the left
+ * spine edge, so the grid keeps both its rhythm and its colour-coding.
+ */
+export function GameCard({
+  game,
+  onPlay,
+  onDetails,
+  onToggleFavorite,
+  revealDelay = 0,
+  coversDir = null,
+}: GameCardProps) {
+  const tone = cartToneClass(game.title);
+  const title = displayTitle(game.title);
+  const art = coverSrc(game, coversDir);
+
+  // Dragging a card onto a collection in the sidebar files it there. The card is
+  // the drag source rather than a separate list, because the thing you want to
+  // file is the thing you are looking at.
+  const handleDragStart = (e: DragEvent) => {
+    e.dataTransfer.setData('gameId', game.id);
+    e.dataTransfer.effectAllowed = 'copy';
   };
 
   return (
     <div
-      className={`rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-105 ${
-        theme === 'light'
-          ? 'bg-white border border-gray-200 hover:shadow-lg'
-          : 'bg-slate-800 border border-slate-700 hover:shadow-xl'
-      }`}
+      className={`cart ${tone} animate-rise group`}
+      style={{ animationDelay: `${revealDelay}ms` }}
+      draggable
+      onDragStart={handleDragStart}
     >
-      {/* Cover / Placeholder */}
-      <div className={`aspect-video flex items-center justify-center ${
-        theme === 'light' ? 'bg-gray-200' : 'bg-slate-700'
-      }`}>
-        {game.custom_cover_path ? (
-          <img src={game.custom_cover_path} alt={game.title} className="w-full h-full object-cover" />
+      {art && <span className="cart-spine" aria-hidden />}
+
+      <div className={`cart-label${art ? ' cart-label--art' : ''}`}>
+        {art ? (
+          <img src={art} alt="" className="cart-art" loading="lazy" />
         ) : (
-          <span className="text-4xl">🎮</span>
+          <h3 className="cart-title" title={game.title}>
+            {title}
+          </h3>
         )}
+
+        {onToggleFavorite && (
+          <button
+            type="button"
+            onClick={() => onToggleFavorite(game)}
+            className={`cart-fav ${game.favorite ? 'cart-fav--on' : ''}`}
+            aria-pressed={game.favorite}
+            title={game.favorite ? 'Remove from favourites' : 'Add to favourites'}
+            aria-label={
+              game.favorite
+                ? `Remove ${title} from favourites`
+                : `Add ${title} to favourites`
+            }
+          >
+            <IconStar size={14} filled={game.favorite} />
+          </button>
+        )}
+
+        {/* Play is the card's primary action, so it owns the label area on
+            hover; details stays a small secondary control in the foot. */}
+        <div className="cart-play">
+          <button
+            type="button"
+            onClick={() => onPlay(game)}
+            className="cart-play-btn"
+            title={`Play ${title}`}
+            aria-label={`Play ${title}`}
+          >
+            <IconPlaySolid size={18} />
+          </button>
+        </div>
       </div>
 
-      {/* Info */}
-      <div className="p-3">
-        <h3 className="font-semibold truncate">{game.title}</h3>
-        <p className={`text-sm ${theme === 'light' ? 'text-gray-500' : 'text-slate-400'}`}>
-          {game.country} • {formatFileSize(game.file_size)}
-        </p>
-
-        {/* Play / Details Buttons */}
-        <div className="mt-3 flex gap-2">
+      <div className="cart-foot">
+        <span
+          className="register truncate"
+          title={`${regionTag(game.country)} · ${game.rom_type} · ${formatRomSize(game.file_size)}`}
+        >
+          {regionCode(game.country)} · {formatRomSize(game.file_size)}
+        </span>
+        {onDetails && (
           <button
-            onClick={() => onPlay(game)}
-            className="flex-1 py-2 bg-primary-600 hover:bg-primary-700 rounded text-sm font-medium transition-colors"
+            type="button"
+            onClick={() => onDetails(game)}
+            className="flex-none text-mute transition-colors hover:text-ink"
+            title={`Details for ${title}`}
+            aria-label={`Details for ${title}`}
           >
-            Play
+            <IconInfo size={14} />
           </button>
-          {onDetails && (
-            <button
-              onClick={() => onDetails(game)}
-              aria-label={`Details for ${game.title}`}
-              title="Details"
-              className={`px-3 py-2 rounded text-sm font-medium transition-colors ${
-                theme === 'light'
-                  ? 'bg-gray-200 hover:bg-gray-300'
-                  : 'bg-slate-700 hover:bg-slate-600'
-              }`}
-            >
-              ℹ
-            </button>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );

@@ -1,15 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState, type DragEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '../common/Button';
 import { Input } from '../common/Input';
-import { Modal } from '../common/Modal';
-
-interface CollectionFoldersProps {
-  theme?: 'dark' | 'light';
-  onSelectCollection?: (collectionId: string | null) => void;
-  selectedCollectionId?: string | null;
-  onGameDrop?: (gameId: string, collectionId: string) => void;
-}
+import { Modal, ConfirmModal } from '../common/Modal';
+import { IconFolder, IconPlus, IconPencil, IconTrash } from '../common/icons';
 
 interface GameFolder {
   id: string;
@@ -19,429 +13,255 @@ interface GameFolder {
   game_count?: number;
 }
 
-interface Game {
-  id: string;
-  title: string;
-  file_name: string;
+interface CollectionFoldersProps {
+  selectedId: string | null;
+  onSelect: (collectionId: string | null) => void;
+  /** Called after a game is filed, so the library can refresh its counts. */
+  onGameFiled?: (gameId: string, collectionId: string) => void;
 }
 
+/**
+ * User-made collections.
+ *
+ * Games are filed by dragging a card (or a list row) onto a collection: the drag
+ * source is the game you are looking at in the shelf. This component used to
+ * carry its own list of games inside the selected collection purely to have
+ * something draggable, which meant the shelf and the sidebar showed overlapping
+ * copies of the same set.
+ */
 export function CollectionFolders({
-  theme = 'dark',
-  onSelectCollection,
-  selectedCollectionId,
-  onGameDrop,
+  selectedId,
+  onSelect,
+  onGameFiled,
 }: CollectionFoldersProps) {
   const [folders, setFolders] = useState<GameFolder[]>([]);
-  const [games, setGames] = useState<Game[]>([]);
-  const [selectedFolder, setSelectedFolder] = useState<string | null>(selectedCollectionId || null);
   const [isLoading, setIsLoading] = useState(true);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showRenameModal, setShowRenameModal] = useState(false);
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [editingFolder, setEditingFolder] = useState<GameFolder | null>(null);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [draggedGameId, setDraggedGameId] = useState<string | null>(null);
-  const [isDragOver, setIsDragOver] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadFolders();
-    loadAllGames();
-  }, []);
+  const [creating, setCreating] = useState(false);
+  const [renaming, setRenaming] = useState<GameFolder | null>(null);
+  const [deleting, setDeleting] = useState<GameFolder | null>(null);
+  const [draftName, setDraftName] = useState('');
 
-  const loadFolders = async () => {
+  const loadFolders = useCallback(async () => {
     try {
       setIsLoading(true);
-      const result = await invoke<GameFolder[]>('get_folders');
-      setFolders(result);
+      setFolders(await invoke<GameFolder[]>('get_folders'));
     } catch (error) {
-      console.error('Failed to load folders:', error);
+      console.error('Failed to load collections:', error);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
-  const loadAllGames = async () => {
-    try {
-      const result = await invoke<Game[]>('get_games');
-      setGames(result);
-    } catch (error) {
-      console.error('Failed to load games:', error);
-    }
-  };
+  useEffect(() => {
+    void loadFolders();
+  }, [loadFolders]);
 
-  const loadGamesInFolder = async (folderId: string) => {
+  const handleCreate = async () => {
+    const name = draftName.trim();
+    if (!name) return;
     try {
-      const result = await invoke<Game[]>('get_games_in_folder', { folderId });
-      setGames(result);
-    } catch (error) {
-      console.error('Failed to load games in folder:', error);
-    }
-  };
-
-  const handleCreateFolder = async () => {
-    if (!newFolderName.trim()) return;
-    
-    try {
-      await invoke('create_folder', { name: newFolderName.trim() });
+      await invoke('create_folder', { name });
       await loadFolders();
-      setShowCreateModal(false);
-      setNewFolderName('');
     } catch (error) {
-      console.error('Failed to create folder:', error);
+      console.error('Failed to create collection:', error);
     }
+    setCreating(false);
+    setDraftName('');
   };
 
-  const handleRenameFolder = async () => {
-    if (!editingFolder || !newFolderName.trim()) return;
-    
+  const handleRename = async () => {
+    const name = draftName.trim();
+    if (!renaming || !name) return;
     try {
-      await invoke('rename_folder', { 
-        folderId: editingFolder.id, 
-        name: newFolderName.trim() 
-      });
+      await invoke('rename_folder', { folderId: renaming.id, name });
       await loadFolders();
-      setShowRenameModal(false);
-      setEditingFolder(null);
-      setNewFolderName('');
     } catch (error) {
-      console.error('Failed to rename folder:', error);
+      console.error('Failed to rename collection:', error);
     }
+    setRenaming(null);
+    setDraftName('');
   };
 
-  const handleDeleteFolder = async () => {
-    if (!editingFolder) return;
-    
+  const handleDelete = async () => {
+    if (!deleting) return;
     try {
-      await invoke('delete_folder', { folderId: editingFolder.id });
+      await invoke('delete_folder', { folderId: deleting.id });
+      // Deleting the active collection has to clear the selection, or the shelf
+      // keeps filtering against an id the backend no longer knows and shows an
+      // empty library with no visible reason.
+      if (selectedId === deleting.id) onSelect(null);
       await loadFolders();
-      if (selectedFolder === editingFolder.id) {
-        setSelectedFolder(null);
-        onSelectCollection?.(null);
-        loadAllGames();
-      }
-      setShowDeleteModal(false);
-      setEditingFolder(null);
     } catch (error) {
-      console.error('Failed to delete folder:', error);
+      console.error('Failed to delete collection:', error);
     }
+    setDeleting(null);
   };
 
-  const handleSelectFolder = (folderId: string | null) => {
-    setSelectedFolder(folderId);
-    onSelectCollection?.(folderId);
-    
-    if (folderId) {
-      loadGamesInFolder(folderId);
-    } else {
-      loadAllGames();
-    }
-  };
-
-  const handleStartRename = (folder: GameFolder) => {
-    setEditingFolder(folder);
-    setNewFolderName(folder.name);
-    setShowRenameModal(true);
-  };
-
-  const handleStartDelete = (folder: GameFolder) => {
-    setEditingFolder(folder);
-    setShowDeleteModal(true);
-  };
-
-  // Drag and Drop handlers
-  const handleDragStart = (e: React.DragEvent, gameId: string) => {
-    e.dataTransfer.setData('gameId', gameId);
-    setDraggedGameId(gameId);
-  };
-
-  const handleDragEnd = () => {
-    setDraggedGameId(null);
-    setIsDragOver(null);
-  };
-
-  const handleDragOver = (e: React.DragEvent, folderId: string) => {
+  const handleDrop = async (e: DragEvent, folderId: string) => {
     e.preventDefault();
-    setIsDragOver(folderId);
-  };
-
-  const handleDragLeave = () => {
-    setIsDragOver(null);
-  };
-
-  const handleDrop = async (e: React.DragEvent, folderId: string) => {
-    e.preventDefault();
+    setDropTarget(null);
     const gameId = e.dataTransfer.getData('gameId');
-    
-    if (gameId) {
-      try {
-        await invoke('add_game_to_folder', { gameId, folderId });
-        onGameDrop?.(gameId, folderId);
-        await loadFolders();
-      } catch (error) {
-        console.error('Failed to add game to folder:', error);
-      }
-    }
-    
-    setIsDragOver(null);
-    setDraggedGameId(null);
-  };
-
-  const handleRemoveGameFromFolder = async (gameId: string) => {
-    if (!selectedFolder) return;
-    
+    if (!gameId) return;
     try {
-      await invoke('remove_game_from_folder', { gameId, folderId: selectedFolder });
-      setGames(games.filter(g => g.id !== gameId));
+      await invoke('add_game_to_folder', { gameId, folderId });
+      onGameFiled?.(gameId, folderId);
+      await loadFolders();
     } catch (error) {
-      console.error('Failed to remove game from folder:', error);
+      console.error('Failed to file game into collection:', error);
     }
   };
-
-  const containerClass = theme === 'light' 
-    ? 'bg-white border-gray-200' 
-    : 'bg-slate-800 border-slate-700';
-
-  const textClass = theme === 'light' 
-    ? 'text-gray-700' 
-    : 'text-slate-200';
-
-  const mutedClass = theme === 'light' 
-    ? 'text-gray-500' 
-    : 'text-slate-400';
-
-  const hoverClass = theme === 'light' 
-    ? 'hover:bg-gray-100' 
-    : 'hover:bg-slate-700';
 
   return (
-    <div className={`h-full flex flex-col rounded-lg border ${containerClass}`}>
-      {/* Header */}
-      <div className={`p-4 border-b ${theme === 'light' ? 'border-gray-200' : 'border-slate-700'}`}>
-        <div className="flex items-center justify-between">
-          <h2 className={`font-semibold ${textClass}`}>Collections</h2>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowCreateModal(true)}
-          >
-            + New
-          </Button>
-        </div>
-      </div>
-
-      {/* All Games */}
-      <div className="p-2">
+    <div>
+      <div className="mb-2 flex items-center justify-between px-1">
+        <p className="eyebrow">Collections</p>
         <button
-          onClick={() => handleSelectFolder(null)}
-          className={`w-full text-left px-3 py-2 rounded-lg flex items-center justify-between ${
-            selectedFolder === null ? 'bg-primary-600 text-white' : `${hoverClass}`
-          }`}
+          type="button"
+          onClick={() => {
+            setDraftName('');
+            setCreating(true);
+          }}
+          className="text-mute transition-colors hover:text-ink"
+          title="New collection"
+          aria-label="New collection"
         >
-          <span className="flex items-center gap-2">
-            <span>📚</span>
-            <span className={textClass}>All Games</span>
-          </span>
-          <span className={`text-xs ${selectedFolder === null ? 'text-white/70' : mutedClass}`}>
-            {games.length}
-          </span>
+          <IconPlus size={14} />
         </button>
       </div>
 
-      {/* Folders List */}
-      <div className="flex-1 overflow-auto p-2 pt-0">
-        {isLoading ? (
-          <div className="p-4 text-center">
-            <span className={mutedClass}>Loading...</span>
-          </div>
-        ) : folders.length === 0 ? (
-          <div className="p-4 text-center">
-            <p className={`text-sm ${mutedClass}`}>No collections yet</p>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="mt-2"
-              onClick={() => setShowCreateModal(true)}
-            >
-              Create Collection
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-1">
-            {folders.map((folder) => (
-              <div
-                key={folder.id}
-                className={`group relative rounded-lg ${
-                  selectedFolder === folder.id 
-                    ? 'bg-primary-600 text-white' 
-                    : `${hoverClass}`
-                }`}
-                onDragOver={(e) => handleDragOver(e, folder.id)}
-                onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, folder.id)}
-              >
-                <button
-                  onClick={() => handleSelectFolder(folder.id)}
-                  className="w-full text-left px-3 py-2 flex items-center justify-between"
+      {isLoading ? (
+        <p className="register px-2">loading…</p>
+      ) : folders.length === 0 ? (
+        <p className="px-2 text-[0.8125rem] leading-relaxed text-mute">
+          No collections yet. Make one, then drag games onto it.
+        </p>
+      ) : (
+        <ul className="space-y-0.5">
+          {folders.map((folder) => {
+            const active = selectedId === folder.id;
+            const isDropTarget = dropTarget === folder.id;
+            return (
+              <li key={folder.id}>
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDropTarget(folder.id);
+                  }}
+                  onDragLeave={() => setDropTarget(null)}
+                  onDrop={(e) => void handleDrop(e, folder.id)}
+                  className={`group flex items-center rounded-md transition-colors ${
+                    isDropTarget
+                      ? 'bg-accent-soft ring-1 ring-accent'
+                      : active
+                        ? 'bg-accent-soft'
+                        : 'hover:bg-raised'
+                  }`}
                 >
-                  <span className="flex items-center gap-2">
-                    <span>📁</span>
-                    <span className={selectedFolder === folder.id ? 'text-white' : textClass}>
-                      {folder.name}
+                  <button
+                    type="button"
+                    onClick={() => onSelect(active ? null : folder.id)}
+                    aria-current={active ? 'true' : undefined}
+                    className={`flex min-w-0 flex-1 items-center gap-2.5 px-2 py-1.5 text-left text-[0.8125rem] font-semibold ${
+                      active ? 'text-accent-text' : 'text-dim group-hover:text-ink'
+                    }`}
+                  >
+                    <span className="flex-none">
+                      <IconFolder size={16} />
                     </span>
-                  </span>
-                  <span className={`text-xs ${
-                    selectedFolder === folder.id ? 'text-white/70' : mutedClass
-                  }`}>
-                    {folder.game_count || 0}
-                  </span>
-                </button>
-                
-                {/* Hover Actions */}
-                <div className={`absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover:flex gap-1 ${
-                  selectedFolder === folder.id ? 'text-white' : ''
-                }`}>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleStartRename(folder);
-                    }}
-                    className={`p-1 rounded ${theme === 'light' ? 'hover:bg-gray-200' : 'hover:bg-slate-600'}`}
-                    title="Rename"
-                  >
-                    ✏️
+                    <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+                    <span className="register flex-none">{folder.game_count ?? 0}</span>
                   </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleStartDelete(folder);
-                    }}
-                    className={`p-1 rounded ${theme === 'light' ? 'hover:bg-gray-200' : 'hover:bg-slate-600'}`}
-                    title="Delete"
-                  >
-                    🗑️
-                  </button>
-                </div>
-                
-                {/* Drop indicator */}
-                {isDragOver === folder.id && (
-                  <div className="absolute inset-0 border-2 border-dashed border-primary-500 rounded-lg bg-primary-500/20" />
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
-      {/* Games in selected folder */}
-      {selectedFolder && games.length > 0 && (
-        <div className={`p-4 border-t ${theme === 'light' ? 'border-gray-200' : 'border-slate-700'}`}>
-          <h3 className={`text-sm font-medium mb-2 ${mutedClass}`}>Games in collection</h3>
-          <div className="space-y-1 max-h-48 overflow-auto">
-            {games.map((game) => (
-              <div
-                key={game.id}
-                draggable
-                onDragStart={(e) => handleDragStart(e, game.id)}
-                onDragEnd={handleDragEnd}
-                className={`flex items-center justify-between px-2 py-1 rounded text-sm ${
-                  theme === 'light' ? 'bg-gray-100' : 'bg-slate-700'
-                } ${draggedGameId === game.id ? 'opacity-50' : ''}`}
-              >
-                <span className={textClass}>{game.title}</span>
-                <button
-                  onClick={() => handleRemoveGameFromFolder(game.id)}
-                  className={`p-1 rounded ${theme === 'light' ? 'hover:bg-gray-200' : 'hover:bg-slate-600'}`}
-                  title="Remove from collection"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
+                  <span className="flex flex-none items-center pr-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraftName(folder.name);
+                        setRenaming(folder);
+                      }}
+                      className="rounded p-1 text-mute hover:text-ink"
+                      title={`Rename ${folder.name}`}
+                      aria-label={`Rename ${folder.name}`}
+                    >
+                      <IconPencil size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeleting(folder)}
+                      className="rounded p-1 text-mute hover:text-danger-text"
+                      title={`Delete ${folder.name}`}
+                      aria-label={`Delete ${folder.name}`}
+                    >
+                      <IconTrash size={13} />
+                    </button>
+                  </span>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       )}
 
-      {/* Create Folder Modal */}
       <Modal
-        isOpen={showCreateModal}
-        onClose={() => {
-          setShowCreateModal(false);
-          setNewFolderName('');
-        }}
-        title="Create Collection"
+        isOpen={creating}
+        onClose={() => setCreating(false)}
+        title="New collection"
+        size="sm"
         footer={
           <>
-            <Button variant="ghost" onClick={() => setShowCreateModal(false)}>
+            <Button variant="ghost" onClick={() => setCreating(false)}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={handleCreateFolder}>
+            <Button onClick={handleCreate} disabled={!draftName.trim()}>
               Create
             </Button>
           </>
         }
       >
         <Input
-          label="Collection Name"
-          value={newFolderName}
-          onChange={(e) => setNewFolderName(e.target.value)}
-          placeholder="Enter collection name"
-          onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
+          label="Name"
+          value={draftName}
+          onChange={(e) => setDraftName(e.target.value)}
+          placeholder="Platformers, RPGs to finish…"
+          onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
         />
       </Modal>
 
-      {/* Rename Folder Modal */}
       <Modal
-        isOpen={showRenameModal}
-        onClose={() => {
-          setShowRenameModal(false);
-          setEditingFolder(null);
-          setNewFolderName('');
-        }}
-        title="Rename Collection"
+        isOpen={renaming !== null}
+        onClose={() => setRenaming(null)}
+        title="Rename collection"
+        size="sm"
         footer={
           <>
-            <Button variant="ghost" onClick={() => setShowRenameModal(false)}>
+            <Button variant="ghost" onClick={() => setRenaming(null)}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={handleRenameFolder}>
+            <Button onClick={handleRename} disabled={!draftName.trim()}>
               Rename
             </Button>
           </>
         }
       >
         <Input
-          label="New Name"
-          value={newFolderName}
-          onChange={(e) => setNewFolderName(e.target.value)}
-          placeholder="Enter new name"
-          onKeyDown={(e) => e.key === 'Enter' && handleRenameFolder()}
+          label="Name"
+          value={draftName}
+          onChange={(e) => setDraftName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleRename()}
         />
       </Modal>
 
-      {/* Delete Folder Modal */}
-      <Modal
-        isOpen={showDeleteModal}
-        onClose={() => {
-          setShowDeleteModal(false);
-          setEditingFolder(null);
-        }}
-        title="Delete Collection"
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setShowDeleteModal(false)}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={handleDeleteFolder}>
-              Delete
-            </Button>
-          </>
-        }
-      >
-        <p className={textClass}>
-          Are you sure you want to delete "{editingFolder?.name}"? 
-          Games in this collection will not be deleted.
-        </p>
-      </Modal>
+      <ConfirmModal
+        isOpen={deleting !== null}
+        onClose={() => setDeleting(null)}
+        onConfirm={handleDelete}
+        title={`Delete “${deleting?.name ?? ''}”?`}
+        message="The collection goes; the games in it stay in your library."
+        confirmText="Delete collection"
+        variant="danger"
+      />
     </div>
   );
 }

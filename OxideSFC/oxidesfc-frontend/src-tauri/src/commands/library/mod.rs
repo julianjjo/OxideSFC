@@ -11,7 +11,10 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use store::add_play_seconds_to_file;
+pub use store::{
+    add_play_seconds_to_file, get_game_by_id, record_play_start, set_cover_file,
+    set_cover_file_for_all,
+};
 
 use crate::AppState;
 use scan::{is_archive_file, is_rom_file, normalize_path_for_comparison, parse_archive_file, parse_rom_file, WalkDir};
@@ -44,6 +47,16 @@ pub struct Game {
     /// existed still deserialize (they simply get 0).
     #[serde(default)]
     pub total_play_seconds: u64,
+    /// File name (not a full path) of this game's cover inside the app's covers
+    /// directory -- see `commands::covers`.
+    ///
+    /// Deliberately a bare file name so the library survives the data directory
+    /// moving or being restored on another machine; the frontend joins it with
+    /// the directory reported by `get_covers_dir`. This is distinct from
+    /// `custom_cover_path`, which is reserved for an image the user points at
+    /// directly, wherever it happens to live.
+    #[serde(default)]
+    pub cover_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,12 +90,25 @@ pub fn get_games() -> Result<Vec<Game>, String> {
     }
 }
 
+/// Scan a folder and persist whatever ROMs it holds into `library.json`.
+///
+/// `recursive` is `Option` rather than a plain `bool` so the parameter could be
+/// introduced without breaking callers that already invoke this with just a
+/// path; it defaults to descending into subfolders, which is what this command
+/// hardcoded before. The library settings screen now forwards the user's
+/// `scan_recursive` preference here -- that setting existed and was persisted,
+/// but nothing had ever read it, so turning it off changed nothing.
 #[tauri::command]
-pub fn add_game_folder(path: String, state: State<AppState>) -> Result<ScanResult, String> {
-    info!("Adding game folder: {}", path);
+pub fn add_game_folder(
+    path: String,
+    recursive: Option<bool>,
+    state: State<AppState>,
+) -> Result<ScanResult, String> {
+    let recursive = recursive.unwrap_or(true);
+    info!("Adding game folder: {} (recursive: {})", path, recursive);
 
     // Scan the directory
-    let result = scan_directory(path.clone(), true)?;
+    let result = scan_directory(path.clone(), recursive)?;
 
     // Hold the library lock for the entire get-modify-save sequence so a
     // concurrent add_game_folder/remove_game call can't interleave with
@@ -309,7 +335,7 @@ pub fn get_game_play_time(game_id: String) -> Result<u64, String> {
         .ok_or_else(|| format!("Game not found: {}", game_id))?;
     Ok(game.total_play_seconds)
 }
-
+
 
 #[tauri::command]
 pub fn scan_directory(path: String, recursive: bool) -> Result<ScanResult, String> {

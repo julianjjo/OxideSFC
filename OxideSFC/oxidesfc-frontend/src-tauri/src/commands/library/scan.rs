@@ -105,6 +105,7 @@ pub(super) fn parse_archive_file(path: &PathBuf) -> Option<Game> {
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
         total_play_seconds: 0,
+        cover_file: None,
     })
 }
 
@@ -150,5 +151,6 @@ pub(super) fn parse_rom_file(path: &PathBuf) -> Option<Game> {
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
         total_play_seconds: 0,
+        cover_file: None,
     })
 }

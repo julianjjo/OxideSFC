@@ -42,7 +42,9 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
     loadState,
   } = useEmulationStore();
 
-  const theme = settings.general?.theme || 'dark';
+  // No theme lookup here: the play view is a black stage in both themes (a light
+  // chrome floating over a game image would glare), and the deck and quick menu
+  // resolve their own colours from tokens.
   const [showMenu, setShowMenu] = useState(false);
   const [webglStatus, setWebglStatus] = useState<string>('');
   const [audioStatus, setAudioStatus] = useState<string>('');
@@ -790,7 +792,6 @@ export function EmulatorView({ onExit, onOpenSettings }: EmulatorViewProps) {
         onClose={() => setShowMenu(false)}
         onOpenSettings={onOpenSettings}
         onExitToMenu={handleStop}
-        theme={theme === 'light' ? 'light' : 'dark'}
         canvasRef={canvasRef}
         gameTitle={currentGame.title}
       />

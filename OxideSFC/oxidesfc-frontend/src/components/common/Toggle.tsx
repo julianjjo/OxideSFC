@@ -1,112 +1,97 @@
-import React, { forwardRef } from 'react';
-import { useSettingsStore } from '../../stores/settingsStore';
+import React, { forwardRef, useId } from 'react';
 
-export interface ToggleProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type' | 'size'> {
+export interface ToggleProps
+  extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type' | 'size'> {
   label?: string;
   description?: string;
-  size?: 'sm' | 'md' | 'lg';
+  /** `sm` for dense lists (one row per item); `md` everywhere else. */
+  size?: 'sm' | 'md';
 }
 
-export const Toggle = forwardRef<HTMLInputElement, ToggleProps>(({
-  label,
-  description,
-  size = 'md',
-  className = '',
-  id,
-  checked,
-  onChange,
-  ...props
-}, ref) => {
-  const { settings } = useSettingsStore();
-  const theme = settings.general.theme;
-
-  const inputId = id || `toggle-${Math.random().toString(36).substr(2, 9)}`;
-
-  const sizeStyles = {
-    sm: {
-      track: 'w-8 h-4',
-      thumb: 'w-3 h-3',
-      translate: 'translate-x-4',
+/**
+ * A switch, rendered as a real focusable `<button role="switch">` with a hidden
+ * checkbox kept in step for form semantics.
+ *
+ * The synthetic change event below exists because every call site in the app
+ * reads `e.target.checked`; the button has no `checked` of its own to report, so
+ * the handler is invoked with a minimal object shaped like the input event those
+ * callers already expect.
+ */
+export const Toggle = forwardRef<HTMLInputElement, ToggleProps>(
+  (
+    {
+      label,
+      description,
+      size = 'md',
+      className = '',
+      id,
+      checked,
+      disabled,
+      onChange,
+      // The switch the user actually operates is the button, not the hidden
+      // checkbox, so an explicit `aria-label` has to be routed there. Spreading
+      // it onto the input along with the rest of `props` left the button with no
+      // accessible name at all -- which is every settings row, since those put
+      // the visible label in the row rather than on the control.
+      'aria-label': ariaLabel,
+      ...props
     },
-    md: {
-      track: 'w-11 h-6',
-      thumb: 'w-5 h-5',
-      translate: 'translate-x-5',
-    },
-    lg: {
-      track: 'w-14 h-7',
-      thumb: 'w-6 h-6',
-      translate: 'translate-x-7',
-    },
-  };
+    ref
+  ) => {
+    // useId is stable across renders, unlike the Math.random() this used to
+    // generate -- a fresh id on every render broke the label's htmlFor link.
+    const generatedId = useId();
+    const inputId = id || `toggle-${generatedId}`;
 
-  return (
-    <div className={`flex items-start ${className}`}>
-      <div className="relative flex-shrink-0">
+    const emitChange = () => {
+      if (disabled) return;
+      onChange?.({
+        target: { checked: !checked },
+      } as React.ChangeEvent<HTMLInputElement>);
+    };
+
+    return (
+      <div className={`flex items-start gap-3 ${className}`}>
         <input
           ref={ref}
           type="checkbox"
           id={inputId}
           checked={checked}
+          disabled={disabled}
           onChange={onChange}
           className="sr-only"
+          tabIndex={-1}
           {...props}
         />
         <button
           type="button"
           role="switch"
-          aria-checked={checked}
-          onClick={() => {
-            const event = {
-              target: { checked: !checked }
-            } as React.ChangeEvent<HTMLInputElement>;
-            onChange?.(event);
-          }}
-          className={`
-            ${sizeStyles[size].track}
-            ${checked
-              ? 'bg-blue-600'
-              : theme === 'light'
-                ? 'bg-gray-300'
-                : 'bg-slate-600'
-            }
-            relative inline-flex flex-shrink-0 cursor-pointer rounded-full transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
-            ${theme === 'light' ? 'focus:ring-offset-white' : 'focus:ring-offset-slate-800'}
-          `}
-        >
-          <span
-            className={`
-              ${sizeStyles[size].thumb}
-              ${size === 'sm' ? 'left-0.5 top-0.5' : size === 'md' ? 'left-0.5 top-0.5' : 'left-0.5 top-0.5'}
-              ${checked ? sizeStyles[size].translate : 'translate-x-0'}
-              pointer-events-none inline-block rounded-full bg-white shadow transform ring-0 transition duration-200 ease-in-out
-            `}
-          />
-        </button>
+          aria-checked={!!checked}
+          aria-label={ariaLabel}
+          aria-labelledby={!ariaLabel && label ? `${inputId}-label` : undefined}
+          disabled={disabled}
+          onClick={emitChange}
+          className={`switch ${size === 'sm' ? 'switch--sm' : ''} ${
+            checked ? 'switch--on' : ''
+          } mt-0.5`}
+        />
+        {(label || description) && (
+          <div className="min-w-0">
+            {label && (
+              <label
+                id={`${inputId}-label`}
+                htmlFor={inputId}
+                className="field-row-label block cursor-pointer"
+              >
+                {label}
+              </label>
+            )}
+            {description && <p className="field-row-help">{description}</p>}
+          </div>
+        )}
       </div>
-      {(label || description) && (
-        <div className="ml-3">
-          {label && (
-            <label
-              htmlFor={inputId}
-              className={`text-sm font-medium ${
-                theme === 'light' ? 'text-gray-900' : 'text-slate-100'
-              }`}
-            >
-              {label}
-            </label>
-          )}
-          {description && (
-            <p className={`text-sm ${
-              theme === 'light' ? 'text-gray-500' : 'text-slate-400'
-            }`}>
-              {description}
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-});
+    );
+  }
+);
 
 Toggle.displayName = 'Toggle';

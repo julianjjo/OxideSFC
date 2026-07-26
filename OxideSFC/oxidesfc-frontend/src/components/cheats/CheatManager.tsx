@@ -10,7 +10,6 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { useSettingsStore } from '../../stores/settingsStore';
 import { Button } from '../common/Button';
 import { Toggle } from '../common/Toggle';
 import { Input } from '../common/Input';
@@ -47,9 +46,6 @@ export interface CheatManagerProps {
 }
 
 export function CheatManager({ game, isOpen, onClose }: CheatManagerProps) {
-  const { settings } = useSettingsStore();
-  const theme = settings.general.theme;
-
   const [cheats, setCheats] = useState<CheatCode[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -317,16 +313,16 @@ export function CheatManager({ game, isOpen, onClose }: CheatManagerProps) {
       }
     >
       {!game ? (
-        <p className="text-center py-8 text-slate-400">
+        <p className="py-8 text-center text-mute">
           Select a game to manage its cheat codes.
         </p>
       ) : isLoading ? (
-        <p className="text-center py-8 text-slate-400">
+        <p className="py-8 text-center text-mute">
           Loading cheats...
         </p>
       ) : cheats.length === 0 ? (
         <div className="text-center py-8">
-          <p className="text-slate-400 mb-4">No cheat codes for this game yet.</p>
+          <p className="mb-4 text-mute">No cheat codes for this game yet.</p>
           <Button onClick={() => { resetForm(); setShowAddModal(true); }}>
             Add Cheat Code
           </Button>
@@ -336,34 +332,20 @@ export function CheatManager({ game, isOpen, onClose }: CheatManagerProps) {
           {cheats.map((cheat) => (
             <div
               key={cheat.id}
-              className={`p-3 rounded-lg flex items-center justify-between ${
-                theme === 'light' ? 'bg-gray-100' : 'bg-slate-700'
-              } ${cheat.enabled ? 'ring-2 ring-blue-500' : ''}`}
+              className={`flex items-center justify-between rounded-md border bg-raised p-3 ${
+                cheat.enabled ? 'border-accent' : 'border-line'
+              }`}
             >
-              <div className="flex-1 min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className={`font-medium ${
-                    theme === 'light' ? 'text-gray-900' : 'text-white'
-                  }`}>
-                    {cheat.name}
-                  </span>
-                  <span className={`text-xs px-2 py-0.5 rounded ${
-                    theme === 'light' ? 'bg-gray-200 text-gray-600' : 'bg-slate-600 text-slate-300'
-                  }`}>
-                    {cheat.format}
-                  </span>
+                  <span className="font-semibold text-ink">{cheat.name}</span>
+                  <span className="chip">{cheat.format}</span>
                 </div>
-                <code className={`text-sm block mt-1 truncate ${
-                  theme === 'light' ? 'text-gray-600' : 'text-slate-400'
-                }`}>
+                <code className="mt-1 block truncate font-mono text-[0.75rem] text-dim">
                   {cheat.code}
                 </code>
                 {cheat.description && (
-                  <p className={`text-xs mt-1 ${
-                    theme === 'light' ? 'text-gray-500' : 'text-slate-500'
-                  }`}>
-                    {cheat.description}
-                  </p>
+                  <p className="field-row-help">{cheat.description}</p>
                 )}
               </div>
               <div className="flex items-center gap-2 ml-4">
@@ -526,10 +508,9 @@ export function CheatManager({ game, isOpen, onClose }: CheatManagerProps) {
         }
       >
         <div className="space-y-4">
-          <p className={`text-sm ${
-            theme === 'light' ? 'text-gray-600' : 'text-slate-400'
-          }`}>
-            Paste JSON data containing cheat codes. Can be a single cheat object, array of cheats, or database format.
+          <p className="text-sm text-dim">
+            Paste JSON containing cheat codes — a single cheat, an array, or a
+            database export.
           </p>
           <TextArea
             value={importText}
