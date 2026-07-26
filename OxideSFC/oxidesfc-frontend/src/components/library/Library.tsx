@@ -477,6 +477,7 @@ export function Library({ onPlayGame }: LibraryProps) {
         onToggleFavorite={handleToggleFavorite}
         onDelete={(game) => void handleDelete(game)}
         coversDir={coversDir}
+        onCollectionsChange={() => setCountsKey((k) => k + 1)}
       />
     </div>
   );

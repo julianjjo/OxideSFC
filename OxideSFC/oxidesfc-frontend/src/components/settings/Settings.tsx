@@ -101,7 +101,7 @@ export function Settings({ onRelaunchWizard }: SettingsProps) {
         <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3" aria-label="Settings sections">
           {searching ? (
             <div>
-              <p className="eyebrow px-1 pb-2 pt-1">
+              <p className="microlabel px-1 pb-2 pt-1">
                 {results.length} {results.length === 1 ? 'match' : 'matches'}
               </p>
               {results.length === 0 ? (

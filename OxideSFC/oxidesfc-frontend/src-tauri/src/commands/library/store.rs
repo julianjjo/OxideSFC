@@ -25,15 +25,34 @@ pub(super) fn get_games_for_mutation() -> Result<Vec<Game>, String> {
     serde_json::from_str(&content).map_err(|e| format!("Failed to parse library: {}", e))
 }
 
-/// Guards `add_play_seconds_to_file`'s read-modify-write sequence.
-/// `EmulationController` (which calls that function from `pause`/`stop`)
-/// only has access to `library.json` via the filesystem, not via
-/// `AppState.library_lock` -- `EmulationController` is itself owned inside
-/// `AppState` behind its own `Mutex`, with no back-reference to the state
-/// that contains it. A dedicated static mutex gives the same
-/// read-modify-write safety as `library_lock` without needing that
-/// back-reference.
-static PLAY_TIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The one lock guarding every `library.json` read-modify-write in the app.
+///
+/// It is a static rather than a field on `AppState` because not every writer can
+/// reach `AppState`: `EmulationController` calls `record_play_start` and
+/// `add_play_seconds_to_file`, and the controller is itself owned *inside*
+/// `AppState` behind its own `Mutex`, with no back-reference to the state that
+/// contains it. A static is reachable from both sides.
+///
+/// This used to be a play-time-only lock sitting alongside an
+/// `AppState.library_lock` used by the command handlers -- two mutexes guarding
+/// one file, which is not synchronisation at all: a save taken under one could
+/// interleave with a save taken under the other and silently drop an update.
+/// Concurrent cover fetching made that easy to hit. `AppState.library_lock` is
+/// gone; acquire this through `library_guard()` instead.
+///
+/// Not reentrant (`std::sync::Mutex` never is), so a function that takes the
+/// guard must not call another that also takes it. `get_games_for_mutation` and
+/// `save_games` deliberately do no locking of their own for exactly this reason.
+static LIBRARY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the library lock, recovering from a poisoned mutex.
+///
+/// Poisoning only means some other writer panicked mid-sequence; the file itself
+/// is either the old or the new version thanks to `save_games`' write-and-rename,
+/// so carrying on is safe and strictly better than refusing to work.
+pub(super) fn library_guard() -> std::sync::MutexGuard<'static, ()> {
+    LIBRARY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Adds `seconds` of real-world elapsed time to a game's
 /// `total_play_seconds` and persists the change. Called by
@@ -44,7 +63,7 @@ pub fn add_play_seconds_to_file(game_id: &str, seconds: u64) -> Result<(), Strin
         return Ok(());
     }
 
-    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
     if let Some(game) = games.iter_mut().find(|g| g.id == game_id) {
@@ -67,11 +86,11 @@ pub fn add_play_seconds_to_file(game_id: &str, seconds: u64) -> Result<(), Strin
 /// anything, and the library's play-count and last-played columns were
 /// permanently blank no matter how much a game had been played.
 ///
-/// Shares `PLAY_TIME_LOCK` with `add_play_seconds_to_file` for the same reason:
-/// both are read-modify-write cycles over `library.json` reached from
-/// `EmulationController`, which has no access to `AppState.library_lock`.
+/// Takes the shared library lock, like every other `library.json` writer.
+/// (This and `add_play_seconds_to_file` are reached from `EmulationController`,
+/// which is why that lock is a static rather than an `AppState` field.)
 pub fn record_play_start(game_id: &str) -> Result<(), String> {
-    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
     if let Some(game) = games.iter_mut().find(|g| g.id == game_id) {
@@ -98,13 +117,11 @@ pub fn get_game_by_id(game_id: &str) -> Result<Option<Game>, String> {
 
 /// Point a library entry at (or away from) a cover image.
 ///
-/// Shares `PLAY_TIME_LOCK` with the other `library.json` read-modify-write
-/// helpers reached from outside `AppState`: cover fetching runs several games
-/// concurrently, so without a shared lock two finishing downloads would each
-/// write back a copy of the file read before the other's update and one would be
-/// lost.
+/// Takes the shared library lock: cover fetching runs several games
+/// concurrently, so without it two finishing downloads would each write back a
+/// copy of the file read before the other's update, and one would be lost.
 pub fn set_cover_file(game_id: &str, cover_file: Option<String>) -> Result<(), String> {
-    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
     if let Some(game) = games.iter_mut().find(|g| g.id == game_id) {
@@ -123,7 +140,7 @@ pub fn set_cover_file(game_id: &str, cover_file: Option<String>) -> Result<(), S
 
 /// Set `cover_file` on every entry at once, for cache-wide operations.
 pub fn set_cover_file_for_all(cover_file: Option<String>) -> Result<(), String> {
-    let _guard = PLAY_TIME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
     let now = chrono::Utc::now().to_rfc3339();

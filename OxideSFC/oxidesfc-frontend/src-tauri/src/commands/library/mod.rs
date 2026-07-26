@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use store::{get_games_for_mutation, get_library_path, save_games};
+use store::{get_games_for_mutation, get_library_path, library_guard, save_games};
 use tauri::State;
 use tracing::{debug, info, warn};
 
@@ -99,11 +99,7 @@ pub fn get_games() -> Result<Vec<Game>, String> {
 /// `scan_recursive` preference here -- that setting existed and was persisted,
 /// but nothing had ever read it, so turning it off changed nothing.
 #[tauri::command]
-pub fn add_game_folder(
-    path: String,
-    recursive: Option<bool>,
-    state: State<AppState>,
-) -> Result<ScanResult, String> {
+pub fn add_game_folder(path: String, recursive: Option<bool>) -> Result<ScanResult, String> {
     let recursive = recursive.unwrap_or(true);
     info!("Adding game folder: {} (recursive: {})", path, recursive);
 
@@ -113,7 +109,7 @@ pub fn add_game_folder(
     // Hold the library lock for the entire get-modify-save sequence so a
     // concurrent add_game_folder/remove_game call can't interleave with
     // this one and lose an update.
-    let _library_guard = state.library_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _library_guard = library_guard();
 
     // Load existing games (propagate errors instead of silently treating a
     // corrupt/unreadable library.json as an empty library, which would
@@ -150,10 +146,10 @@ pub fn add_game_folder(
 }
 
 #[tauri::command]
-pub fn remove_game(game_id: String, state: State<AppState>) -> Result<(), String> {
+pub fn remove_game(game_id: String) -> Result<(), String> {
     info!("Removing game: {}", game_id);
 
-    let _library_guard = state.library_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _library_guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
     games.retain(|g| g.id != game_id);
@@ -178,10 +174,10 @@ fn toggle_favorite_in(games: &mut [Game], game_id: &str) -> Result<bool, String>
 /// Flips a game's `favorite` flag and persists the change. Returns the new
 /// value so the caller doesn't need a separate round-trip to learn it.
 #[tauri::command]
-pub fn toggle_game_favorite(game_id: String, state: State<AppState>) -> Result<bool, String> {
+pub fn toggle_game_favorite(game_id: String) -> Result<bool, String> {
     info!("Toggling favorite for game: {}", game_id);
 
-    let _library_guard = state.library_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _library_guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
     let new_value = toggle_favorite_in(&mut games, &game_id)?;
@@ -193,10 +189,10 @@ pub fn toggle_game_favorite(game_id: String, state: State<AppState>) -> Result<b
 /// Wipes every entry from the library, without touching the underlying ROM
 /// files on disk -- this only clears `library.json`.
 #[tauri::command]
-pub fn clear_library(state: State<AppState>) -> Result<(), String> {
+pub fn clear_library() -> Result<(), String> {
     info!("Clearing library");
 
-    let _library_guard = state.library_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _library_guard = library_guard();
 
     save_games(&[])?;
 
@@ -214,13 +210,19 @@ pub fn clear_library(state: State<AppState>) -> Result<(), String> {
 pub fn rescan_library(state: State<AppState>) -> Result<ScanResult, String> {
     info!("Rescanning library");
 
-    let folders = crate::commands::settings::get_settings(state.clone())?.library.folders;
+    // Both the folder list and the recursion preference come from settings.
+    // `recursive` used to be hardcoded `true` here, which quietly undid the
+    // user's "Include subfolders" choice on every rescan even after
+    // `add_game_folder` started honouring it -- so the two scan paths disagreed.
+    let library_settings = crate::commands::settings::get_settings(state.clone())?.library;
+    let folders = library_settings.folders;
+    let recursive = library_settings.scan_recursive;
 
     let mut all_new_games = Vec::new();
     let mut all_errors = Vec::new();
 
     for folder in &folders {
-        match scan_directory(folder.clone(), true) {
+        match scan_directory(folder.clone(), recursive) {
             Ok(result) => {
                 all_errors.extend(result.errors);
                 all_new_games.extend(result.games);
@@ -232,7 +234,7 @@ pub fn rescan_library(state: State<AppState>) -> Result<ScanResult, String> {
         }
     }
 
-    let _library_guard = state.library_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _library_guard = library_guard();
 
     let mut games = get_games_for_mutation()?;
 
@@ -278,10 +280,10 @@ fn partition_missing_games(games: Vec<Game>) -> (Vec<Game>, Vec<Game>) {
 /// (moved/deleted ROM), persists the pruned list, and reports what was
 /// removed so the frontend can show a summary.
 #[tauri::command]
-pub fn verify_library(state: State<AppState>) -> Result<VerifyResult, String> {
+pub fn verify_library() -> Result<VerifyResult, String> {
     info!("Verifying library");
 
-    let _library_guard = state.library_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _library_guard = library_guard();
 
     let games = get_games_for_mutation()?;
     let (kept, removed) = partition_missing_games(games);

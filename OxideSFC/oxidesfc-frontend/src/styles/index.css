@@ -80,16 +80,23 @@ body {
    Typography primitives
    ===========================================================================
 
-   `.register` is the app's utility voice: monospace, small, tracked out. It is
-   reserved for values the machine actually reports -- 256x224, 60 Hz, LoROM,
-   8 Mbit, 32 kHz, $2100 -- and must not be used to dress up prose. Keeping it
-   strictly factual is what makes it read as instrumentation instead of
-   decoration, and it ties the library and settings screens back to the
-   emulator deck's existing readout.
+   `.register` is the app's utility voice: monospace, small, tracked out, with
+   tabular figures. It is for *recorded factual values* -- what the machine
+   reports (256x224, 60 Hz, LoROM, 8 Mbit, $2100) and what the app has measured
+   (playtime, session counts, buffer fill, timestamps). What it must never do is
+   dress up prose or label a control: the moment it is used to make arbitrary
+   text look technical it stops reading as instrumentation. Tabular figures are
+   the tell for whether a use belongs -- if the content isn't a value worth
+   aligning digit-for-digit, it isn't a register.
 
-   `.eyebrow` labels a section by the hardware it governs (PPU / OUTPUT,
-   S-DSP / APU, JOYPAD 1-2). The label carries information, so it earns its
-   place; a purely ornamental eyebrow would not.
+   `.microlabel` is the *visual* treatment for micro caps: mono, tracked wide,
+   uppercase. `.eyebrow` is one semantic use of it -- naming a section by the
+   hardware it governs (PPU / OUTPUT, S-DSP / APU, JOYPAD 1-2). They are split
+   because the two were conflated: `.eyebrow` got reused as a data label in the
+   library's stat lists, where nothing is being named by its hardware scope, and
+   overloading it that way erodes the one thing its name promises. Reach for
+   `.microlabel` for a caption or a data label; reach for `.eyebrow` only when
+   heading a section.
    =========================================================================== */
 
 .register {
@@ -100,6 +107,7 @@ body {
   color: var(--text-mute);
 }
 
+.microlabel,
 .eyebrow {
   font-family: var(--font-mono);
   font-size: 0.625rem;

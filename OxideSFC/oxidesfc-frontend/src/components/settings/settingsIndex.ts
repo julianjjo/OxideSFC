@@ -28,6 +28,14 @@ export interface SettingsIndexEntry {
   keywords: string[];
 }
 
+/**
+ * MAINTENANCE: `label` and `section` must match what the panel actually renders.
+ *
+ * They are what a search result shows, so a stale entry sends someone to a
+ * control that has been renamed or removed — worse than not indexing it at all.
+ * There is no automated check (the project has no TS test runner), so this list
+ * has to be updated in the same change as the panel.
+ */
 export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   // -- Video ----------------------------------------------------------------
   {
@@ -43,6 +51,8 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
     keywords: [
       'nearest',
       'bilinear',
+      'xbrz',
+      'hq2x',
       'blurry',
       'sharp',
       'smoothing',
@@ -55,59 +65,69 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   {
     label: 'Shader',
     panel: 'video',
-    section: 'Video filters',
-    keywords: ['crt', 'scanlines', 'xbrz', 'hq2x', 'scale2x', 'effect', 'post'],
+    section: 'Video filter',
+    keywords: ['crt', 'scanlines', 'curvature', 'vignette', 'effect', 'post'],
   },
   {
     label: 'Vertical sync',
     panel: 'video',
-    section: 'Performance',
+    section: 'Frame delivery',
     keywords: ['vsync', 'tearing', 'refresh', 'stutter'],
   },
   {
     label: 'Frame limit',
     panel: 'video',
-    section: 'Performance',
+    section: 'Frame delivery',
     keywords: ['fps', 'framerate', 'cap', 'unlimited', '60', '120'],
   },
 
   // -- Audio ----------------------------------------------------------------
   {
-    label: 'Audio output',
+    label: 'Enable audio',
     panel: 'audio',
-    section: 'Output',
-    keywords: ['mute', 'sound', 'enable', 'disable', 'silence'],
+    section: 'Sound',
+    keywords: ['mute', 'sound', 'audio', 'enable', 'disable', 'silence'],
   },
   {
-    label: 'Master volume',
+    label: 'Volume',
     panel: 'audio',
-    section: 'Levels',
-    keywords: ['loud', 'quiet', 'gain', 'volume'],
+    section: 'Sound',
+    keywords: ['loud', 'quiet', 'gain', 'volume', 'music', 'sfx'],
   },
   {
     label: 'Buffer target',
     panel: 'audio',
     section: 'Buffering',
-    keywords: ['latency', 'delay', 'crackle', 'pop', 'underrun', 'glitch', 'lag', 'ms'],
+    keywords: [
+      'latency',
+      'delay',
+      'crackle',
+      'pop',
+      'underrun',
+      'glitch',
+      'lag',
+      'ms',
+      'stutter',
+    ],
   },
   {
-    label: 'Audio buffering',
+    label: 'Live pipeline',
     panel: 'audio',
-    section: 'Buffering',
-    keywords: ['buffer', 'smooth', 'dropouts'],
+    section: 'Live pipeline',
+    keywords: ['diagnostics', 'underruns', 'dropped', 'drc', 'stats', 'debug', 'buffer fill'],
   },
 
   // -- Controls -------------------------------------------------------------
   {
-    label: 'Keyboard input',
+    label: 'Enable keyboard input',
     panel: 'controls',
-    section: 'Keyboard',
-    keywords: ['keys', 'enable', 'disable'],
+    section: 'Keyboard mapping',
+    keywords: ['keys', 'keyboard', 'enable', 'disable'],
   },
   {
-    label: 'Button mapping',
+    label: 'Keyboard mapping',
     panel: 'controls',
-    section: 'Keyboard',
+    section: 'Keyboard mapping',
     keywords: [
       'remap',
       'rebind',
@@ -121,107 +141,137 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
       'start',
       'select',
       'dpad',
+      'defaults',
     ],
   },
   {
-    label: 'Gamepad input',
+    label: 'Enable gamepad input',
     panel: 'controls',
     section: 'Gamepad',
     keywords: ['controller', 'joystick', 'pad', 'xbox', 'playstation', 'usb'],
   },
   {
-    label: 'Deadzone',
+    label: 'Button layout',
     panel: 'controls',
     section: 'Gamepad',
-    keywords: ['stick', 'analog', 'drift', 'sensitivity'],
+    keywords: ['profile', 'layout', 'xbox', 'playstation', 'switch', 'preset'],
   },
   {
-    label: 'Gamepad profile',
+    label: 'Stick deadzone',
     panel: 'controls',
     section: 'Gamepad',
-    keywords: ['layout', 'xbox', 'playstation', 'switch', 'preset'],
+    keywords: ['deadzone', 'stick', 'analog', 'drift', 'sensitivity'],
+  },
+  {
+    label: 'Input test',
+    panel: 'controls',
+    section: 'Gamepad',
+    keywords: ['test', 'check', 'detect', 'buttons', 'axes', 'troubleshoot'],
   },
 
   // -- Library --------------------------------------------------------------
   {
     label: 'ROM folders',
     panel: 'library',
-    section: 'Sources',
+    section: 'ROM folders',
     keywords: ['path', 'directory', 'add', 'scan', 'games', 'roms', 'folder'],
   },
   {
-    label: 'Scan on startup',
+    label: 'Include subfolders',
     panel: 'library',
-    section: 'Scanning',
-    keywords: ['auto', 'automatic', 'launch', 'refresh'],
+    section: 'How folders are read',
+    keywords: ['recursive', 'nested', 'subdirectory', 'depth', 'scan'],
   },
   {
-    label: 'Metadata fetching',
+    label: 'Fetch metadata',
     panel: 'library',
-    section: 'Scanning',
-    keywords: ['online', 'internet', 'scrape', 'info', 'download'],
+    section: 'How folders are read',
+    keywords: ['online', 'internet', 'scrape', 'info', 'download', 'artwork'],
   },
   {
-    label: 'Artwork source',
+    label: 'Get cover art',
     panel: 'library',
-    section: 'Artwork',
-    keywords: ['cover', 'box art', 'screenscraper', 'igdb', 'images', 'thumbnails'],
+    section: 'Cover art',
+    keywords: [
+      'cover',
+      'covers',
+      'box art',
+      'boxart',
+      'artwork',
+      'images',
+      'thumbnails',
+      'libretro',
+      'download',
+      'missing',
+    ],
   },
   {
-    label: 'Cover resolution',
+    label: 'Re-check everything',
     panel: 'library',
-    section: 'Artwork',
-    keywords: ['size', 'quality', 'thumbnail', 'storage'],
+    section: 'Cover art',
+    keywords: ['recheck', 'retry', 'again', 'force', 'refresh', 'covers'],
   },
   {
-    label: 'Verify library',
+    label: 'Cached images',
     panel: 'library',
-    section: 'Maintenance',
-    keywords: ['missing', 'broken', 'clean', 'prune', 'check'],
+    section: 'Cover art',
+    keywords: ['cache', 'clear', 'delete', 'covers', 'disk space', 'storage'],
   },
   {
-    label: 'Clear library',
+    label: 'Verify',
     panel: 'library',
-    section: 'Maintenance',
-    keywords: ['reset', 'delete', 'wipe', 'remove all', 'empty'],
+    section: 'Library data',
+    keywords: ['missing', 'broken', 'clean', 'prune', 'check', 'verify'],
+  },
+  {
+    label: 'Clear',
+    panel: 'library',
+    section: 'Library data',
+    keywords: ['reset', 'delete', 'wipe', 'remove all', 'empty', 'clear library'],
   },
 
   // -- General --------------------------------------------------------------
   {
     label: 'Theme',
     panel: 'general',
-    section: 'Appearance',
-    keywords: ['dark', 'light', 'colour', 'color', 'bright'],
+    section: 'Theme and accent',
+    keywords: ['dark', 'light', 'colour', 'color', 'bright', 'appearance'],
   },
   {
     label: 'Accent colour',
     panel: 'general',
-    section: 'Appearance',
+    section: 'Theme and accent',
     keywords: ['accent', 'highlight', 'colour', 'color', 'red', 'blue', 'green', 'yellow'],
   },
   {
     label: 'Language',
     panel: 'general',
-    section: 'Application',
+    section: 'Startup and behaviour',
     keywords: ['locale', 'translation', 'english', 'spanish'],
+  },
+  {
+    label: 'Show window on start',
+    panel: 'general',
+    section: 'Startup and behaviour',
+    keywords: ['minimised', 'minimized', 'tray', 'launch', 'startup'],
   },
   {
     label: 'Confirm before exit',
     panel: 'general',
-    section: 'Application',
+    section: 'Startup and behaviour',
     keywords: ['quit', 'close', 'prompt', 'warning'],
   },
   {
     label: 'Setup wizard',
     panel: 'general',
-    section: 'Application',
+    section: 'Startup and behaviour',
     keywords: ['onboarding', 'first run', 'replay', 'walkthrough', 'tutorial'],
   },
   {
-    label: 'Settings file',
+    label: 'Where your settings live',
     panel: 'general',
-    section: 'About',
-    keywords: ['json', 'path', 'config', 'location', 'where', 'stored', 'backup'],
+    section: 'OxideSFC',
+    keywords: ['json', 'path', 'config', 'location', 'where', 'stored', 'backup', 'file'],
   },
 ];
 

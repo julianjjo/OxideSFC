@@ -199,9 +199,26 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
       if (repair.repaired) {
         console.warn('Repaired an inverted keyboard mapping in saved settings.');
-        // Fire-and-forget: a failed write just means the repair is redone next
-        // launch, which is harmless.
-        invoke('save_settings', { settings }).catch((error) => {
+        // Queued on `pendingSave` like every other write, not fired off
+        // independently: this runs during startup, exactly when the settings
+        // screen may already be dispatching a save, and two unordered writers
+        // would let one clobber the other. Re-reading the live state inside the
+        // chain also means a save that landed first is preserved -- the repair
+        // only needs to fix the mapping, not restore a whole snapshot.
+        const run = pendingSave.then(async () => {
+          const current = useSettingsStore.getState().settings;
+          const repaired: AppSettings = {
+            ...current,
+            controls: { ...current.controls, keyboard_mapping: repair.mapping },
+          };
+          await invoke('save_settings', { settings: repaired });
+          set({ settings: repaired });
+        });
+        pendingSave = run.catch(() => {});
+        // Not awaited: loadSettings' own contract is "the read is done", and
+        // blocking startup on the repair write would delay first paint. A failed
+        // write just means the repair is redone next launch.
+        run.catch((error) => {
           console.error('Failed to persist repaired keyboard mapping:', error);
         });
       }

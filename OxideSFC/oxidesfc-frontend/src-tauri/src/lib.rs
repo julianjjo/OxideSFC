@@ -12,17 +12,20 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 pub struct AppState {
     pub emulation: Mutex<emulation::EmulationController>,
     pub input_manager: Mutex<input::InputManager>,
-    /// Guards the read-modify-write sequence (get_games -> mutate ->
-    /// save_games) in commands::library so concurrent calls (e.g.
-    /// add_game_folder racing remove_game) can't interleave and lose
-    /// updates to library.json. Holds no data itself -- it's purely a
-    /// mutual-exclusion gate around that file.
-    pub library_lock: Mutex<()>,
-    /// Same pattern as `library_lock`, but for settings.json. Guards
-    /// commands::settings' load-then-save sequences so two near-simultaneous
-    /// save_settings invocations (or a save racing the default-settings
-    /// bootstrap in get_settings) can't interleave a stale read with a write
-    /// and silently drop one side's changes. Holds no data itself.
+    // NOTE: there is deliberately no `library_lock` here.
+    //
+    // `library.json` is guarded by a single static in `commands::library::store`
+    // (acquired via `library_guard()`). It cannot live on `AppState`, because
+    // `EmulationController` -- which records play sessions and play time -- is
+    // itself owned inside this struct behind its own `Mutex` and has no
+    // back-reference to reach a sibling field. Having a lock here *as well*
+    // meant two mutexes guarding one file, which is not synchronisation: a save
+    // taken under one could interleave with a save under the other and drop an
+    // update. If you add a `library.json` writer, use `library_guard()`.
+    /// Guards commands::settings' load-then-save sequences so two
+    /// near-simultaneous save_settings invocations (or a save racing the
+    /// default-settings bootstrap in get_settings) can't interleave a stale read
+    /// with a write and silently drop one side's changes. Holds no data itself.
     pub settings_lock: Mutex<()>,
     /// Same pattern again, but for folders.json (commands::folders' game
     /// folders/collections store). Holds no data itself.
@@ -119,7 +122,6 @@ pub fn run() {
     let app_state = AppState {
         emulation: Mutex::new(emulation::EmulationController::new()),
         input_manager: Mutex::new(input::InputManager::new()),
-        library_lock: Mutex::new(()),
         settings_lock: Mutex::new(()),
         folders_lock: Mutex::new(()),
     };
@@ -168,6 +170,7 @@ pub fn run() {
             commands::covers::clear_cover_cache,
             commands::folders::get_folders,
             commands::folders::get_games_in_folder,
+            commands::folders::get_folders_for_game,
             commands::folders::create_folder,
             commands::folders::rename_folder,
             commands::folders::delete_folder,

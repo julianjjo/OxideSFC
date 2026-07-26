@@ -14,6 +14,7 @@ import {
   regionTag,
 } from '../../domain/romFormat';
 import { coverSrc } from '../../domain/coverArt';
+import { CollectionPicker } from './CollectionPicker';
 
 // Re-exported so existing `import { Game } from './GameDetailsModal'` call sites
 // keep working. The real shape lives in libraryStore.ts, matching what the
@@ -28,6 +29,8 @@ interface GameDetailsModalProps {
   onToggleFavorite: (game: Game) => void;
   onDelete: (game: Game) => void;
   coversDir?: string | null;
+  /** Called when collection membership changes, so counts can refresh. */
+  onCollectionsChange?: () => void;
 }
 
 export function GameDetailsModal({
@@ -38,6 +41,7 @@ export function GameDetailsModal({
   onToggleFavorite,
   onDelete,
   coversDir = null,
+  onCollectionsChange,
 }: GameDetailsModalProps) {
   const [playSeconds, setPlaySeconds] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -173,6 +177,11 @@ export function GameDetailsModal({
                   </div>
                 ))}
               </dl>
+            </section>
+
+            <section>
+              <p className="eyebrow mb-1.5">Collections</p>
+              <CollectionPicker gameId={game.id} onChange={onCollectionsChange} />
             </section>
 
             <section>

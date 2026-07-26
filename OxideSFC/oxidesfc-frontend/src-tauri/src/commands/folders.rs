@@ -132,6 +132,23 @@ pub fn get_games_in_folder(folder_id: String) -> Result<Vec<Game>, String> {
         .collect())
 }
 
+/// Ids of the collections a single game belongs to.
+///
+/// The inverse of `get_games_in_folder`, and the query the game details panel
+/// needs: it has to show membership for every collection at once, which would
+/// otherwise mean one `get_games_in_folder` round-trip per collection (each of
+/// which also loads the whole library) just to render a list of checkboxes.
+#[tauri::command]
+pub fn get_folders_for_game(game_id: String) -> Result<Vec<String>, String> {
+    let store = load_store()?;
+    Ok(store
+        .associations
+        .iter()
+        .filter(|(gid, _)| gid == &game_id)
+        .map(|(_, fid)| fid.clone())
+        .collect())
+}
+
 #[tauri::command]
 pub fn create_folder(name: String, state: State<AppState>) -> Result<GameFolder, String> {
     info!("Creating folder: {}", name);

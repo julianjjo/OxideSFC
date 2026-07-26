@@ -102,7 +102,7 @@ export function ContinueHero({
           <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1.5">
             {stats.map(([label, value]) => (
               <div key={label}>
-                <dt className="eyebrow">{label}</dt>
+                <dt className="microlabel">{label}</dt>
                 <dd className="register mt-0.5 text-ink">{value}</dd>
               </div>
             ))}

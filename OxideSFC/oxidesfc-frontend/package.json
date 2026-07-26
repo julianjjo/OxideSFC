@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "check:settings-index": "node scripts/check-settings-index.mjs",
+    "build": "tsc && node scripts/check-settings-index.mjs && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

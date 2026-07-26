@@ -89,7 +89,13 @@ When adding a feature that touches both Rust and TS, the typical chain is: Tauri
 
 `src/theme.ts` owns `applyAppearance()`; `stores/settingsStore.ts` calls it on every load/save so appearance can never lag the persisted value. `tailwind.config.js` maps the tokens to utility names (`bg-panel`, `text-ink`, `text-dim`, `border-line`, `bg-accent-soft`, …) — there is deliberately **no** `dark:` variant, since that would be a second competing mechanism. `src/styles/index.css` holds the component primitives (`.panel`, `.btn`, `.field`, `.seg`, `.switch`, `.range`, `.cart`, `.rom-table`, `.rail`, plus the play deck's `.control-deck`/`.deck-*`).
 
-Two typographic roles carry meaning and must not be used decoratively: `.register` (monospace microtext) is only for values the machine actually reports — `256×224`, `60 Hz`, `LoROM`, `8 Mbit` — and `.eyebrow` labels a section by the hardware it governs (`PPU / OUTPUT`, `S-DSP / APU`, `JOYPAD 1-2`). No webfont is bundled or fetched; the stacks resolve to Segoe UI Variable / Cascadia Mono on Windows.
+Three typographic roles carry meaning and must not be used decoratively:
+
+- **`.register`** — monospace microtext with tabular figures, for *recorded factual values*: both what the machine reports (`256×224`, `60 Hz`, `LoROM`, `8 Mbit`, `$2100`) and what the app has measured (playtime, session counts, buffer fill, timestamps). Never for prose, and never to label a control. The tell for whether a use belongs is the tabular figures: if the content isn't a value worth aligning digit-for-digit, it isn't a register.
+- **`.eyebrow`** — heads a *section*, naming the hardware it governs where the section maps to hardware (`PPU / OUTPUT`, `S-DSP / APU`, `JOYPAD 1-2`).
+- **`.microlabel`** — the same visual treatment as `.eyebrow` (mono micro caps, tracked wide) for captions and data labels, e.g. the `<dt>`s in the library's stat lists. It exists so `.eyebrow` keeps meaning "section heading": the two were conflated at first, and reusing `.eyebrow` as a data label erodes the one thing its name promises.
+
+No webfont is bundled or fetched; the stacks resolve to Segoe UI Variable / Cascadia Mono on Windows.
 
 ### Settings screen
 

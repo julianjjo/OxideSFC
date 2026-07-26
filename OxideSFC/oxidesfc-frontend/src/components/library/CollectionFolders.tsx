@@ -135,7 +135,8 @@ export function CollectionFolders({
         <p className="register px-2">loading…</p>
       ) : folders.length === 0 ? (
         <p className="px-2 text-[0.8125rem] leading-relaxed text-mute">
-          No collections yet. Make one, then drag games onto it.
+          No collections yet. Make one, then add games by dragging them onto it —
+          or from a game's details, which also works from the keyboard.
         </p>
       ) : (
         <ul className="space-y-0.5">

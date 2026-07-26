@@ -291,7 +291,7 @@ export function WelcomeWizard({
         <header className="flex-none border-b border-line px-6 pb-4 pt-5">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <p className="eyebrow">
+              <p className="microlabel">
                 Step {currentStepIndex + 1} of {WIZARD_STEPS.length}
               </p>
               <h2 id="wizard-title" className="display-lg mt-1 text-ink">

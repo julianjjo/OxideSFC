@@ -351,7 +351,7 @@ export function ControllerSettings() {
             <div className="mt-2 grid grid-cols-2 gap-3">
               {[0, 2].map((axisBase) => (
                 <div key={axisBase} className="flex items-center gap-2">
-                  <span className="eyebrow">
+                  <span className="microlabel">
                     {axisBase === 0 ? 'Left stick' : 'Right stick'}
                   </span>
                   <span className="register text-ink">

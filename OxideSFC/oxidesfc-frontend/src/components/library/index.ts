@@ -17,3 +17,5 @@ export {
   type QuickView,
 } from './FilterSidebar';
 export { CollectionFolders } from './CollectionFolders';
+// The keyboard-accessible counterpart to dragging a card onto a collection.
+export { CollectionPicker } from './CollectionPicker';
